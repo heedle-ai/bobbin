@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="290" viewBox="0 0 680 290" role="img"><title>From a mistake to a codified invariant</title><desc>A mistake becomes a named invariant on the wiki, guarded by a test, static check or fuzz target. A CI gate checks every invariant has a guard and every guard is documented.</desc><style>
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.w{stroke:#5F5E5A;stroke-width:1.5;fill:none}.dot{fill:#5F5E5A}
+.d{stroke:#888780;stroke-width:0.8;fill:none;stroke-dasharray:5 4}
+.l{font-size:12px;fill:#5F5E5A}.f{font-size:13px;fill:#444441}
+.t1{font-size:14px;font-weight:600}.t2{font-size:12px}
+.p rect{fill:#EEEDFE;stroke:#534AB7}.p .t1{fill:#3C3489}.p .t2{fill:#534AB7}
+.g rect{fill:#E1F5EE;stroke:#0F6E56}.g .t1{fill:#085041}.g .t2{fill:#0F6E56}
+.c rect{fill:#FAECE7;stroke:#993C1D}.c .t1{fill:#712B13}.c .t2{fill:#993C1D}
+.n rect{fill:#F1EFE8;stroke:#5F5E5A}.n .t1{fill:#444441}.n .t2{fill:#5F5E5A}
+@media (prefers-color-scheme:dark){
+.w{stroke:#B4B2A9}.dot{fill:#B4B2A9}.d{stroke:#888780}.l{fill:#B4B2A9}.f{fill:#D3D1C7}
+.p rect{fill:#3C3489;stroke:#AFA9EC}.p .t1{fill:#EEEDFE}.p .t2{fill:#CECBF6}
+.g rect{fill:#085041;stroke:#5DCAA5}.g .t1{fill:#E1F5EE}.g .t2{fill:#9FE1CB}
+.c rect{fill:#712B13;stroke:#F0997B}.c .t1{fill:#FAECE7}.c .t2{fill:#F5C4B3}
+.n rect{fill:#444441;stroke:#B4B2A9}.n .t1{fill:#F1EFE8}.n .t2{fill:#D3D1C7}}
+</style><defs><marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#888780" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs><g class="c"><rect x="40" y="40" width="160" height="56" rx="6" stroke-width="0.8"/><text class="t1" x="120.0" y="59.0" text-anchor="middle" dominant-baseline="central">Mistake found</text><text class="t2" x="120.0" y="78.0" text-anchor="middle" dominant-baseline="central">review, test, or user</text></g><path class="w" d="M200 68 L246 68" marker-end="url(#a)"/><g class="p"><rect x="250" y="40" width="180" height="56" rx="6" stroke-width="0.8"/><text class="t1" x="340.0" y="59.0" text-anchor="middle" dominant-baseline="central">Named invariant</text><text class="t2" x="340.0" y="78.0" text-anchor="middle" dominant-baseline="central">wiki + string diagram</text></g><path class="w" d="M430 68 L476 68" marker-end="url(#a)"/><g class="p"><rect x="480" y="40" width="160" height="56" rx="6" stroke-width="0.8"/><text class="t1" x="560.0" y="59.0" text-anchor="middle" dominant-baseline="central">Guard</text><text class="t2" x="560.0" y="78.0" text-anchor="middle" dominant-baseline="central">test, check, or fuzz</text></g><path class="w" d="M560 96 L560 170" marker-end="url(#a)"/><path class="w" d="M340 96 L340 170" marker-end="url(#a)"/><g class="g"><rect x="250" y="174" width="390" height="56" rx="6" stroke-width="0.8"/><text class="t1" x="445.0" y="193.0" text-anchor="middle" dominant-baseline="central">CI gate on every push</text><text class="t2" x="445.0" y="212.0" text-anchor="middle" dominant-baseline="central">every invariant guarded, every guard listed</text></g><text class="l" x="340" y="262" text-anchor="middle">The gate fails if a doc claims an unguarded invariant, or a guard isn't documented</text></svg>
