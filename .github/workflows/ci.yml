@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]   # Linux amd64, Linux arm64, macOS Apple Silicon
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: bobbin
+      - uses: actions/checkout@v4      # go.mod replaces the heedle-ai modules with ../
+        with:
+          repository: heedle-ai/weft
+          path: weft
+      - uses: actions/checkout@v4
+        with:
+          repository: heedle-ai/shuttle
+          path: shuttle
+      - uses: actions/checkout@v4
+        with:
+          repository: heedle-ai/draft
+          path: draft
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bobbin/go.mod
+          cache-dependency-path: bobbin/go.sum
+      - name: gofmt
+        working-directory: bobbin
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: vet
+        working-directory: bobbin
+        run: go vet ./...
+      - name: test
+        working-directory: bobbin
+        run: go test -race ./...
+      - name: invariants
+        working-directory: bobbin
+        run: bash .github/invariants.sh
+      # GitHub's Linux runners have Podman; macOS runners have no container
+      # engine. Here the container tests must run: skipping fails.
+      - name: containers
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: bobbin
+        env:
+          BOBBIN_REQUIRE_PODMAN: "1"
+        run: |
+          podman --version
+          go test -count=1 -v -run 'TestContainer_' . | tee containers.log
+          ! grep -q -- '--- SKIP' containers.log
+          grep -q -- '--- PASS: TestContainer_RetryRunsInAFreshContainer' containers.log

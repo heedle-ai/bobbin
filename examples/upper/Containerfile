@@ -1,0 +1,3 @@
+FROM scratch
+COPY upper /upper
+ENTRYPOINT ["/upper"]

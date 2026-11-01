@@ -1,0 +1,65 @@
+## One step, one container
+
+[[/images/fresh-runtime.svg|alt=Attempt 1 runs in container A and fails; Temporal retries in a fresh container B that can't see A's files; only B's output reaches Temporal, loom's Record and the Git store, which is outside every container]]
+
+`Runner.Run` starts a container, writes the input to its standard input, waits, and returns its standard output. The command line is fixed; `Spec.Argv` returns it, and `TestInv_ExactPodmanCommandLine` checks it word for word:
+
+```text
+podman run --rm -i --pull=never --network=none --cap-drop=all
+           --security-opt=no-new-privileges --pids-limit=256 --memory=512m
+           --log-driver=none [--timeout=N] [--env KEY=VALUE ...]
+           IMAGE [ARGS ...]
+```
+
+Every flag comes before the image. Podman stops reading its own flags at the image, so arguments such as `--volume=/:/host` after it go to the agent as plain arguments, never to Podman.
+
+| Flag | What it does | Why |
+|---|---|---|
+| `run --rm` | New container, removed when it exits | Its writable layer, and everything the agent wrote, is deleted. Nothing carries over to the next step, run or retry |
+| `-i` | Keeps standard input open | The upstream outputs arrive on stdin |
+| `--pull=never` | Only images already on this machine | No download in the middle of a run; an image that isn't present fails at once with `ErrSetup` |
+| `--network=none` | Only a loopback interface | Agents can't reach the network, including other services on the host |
+| `--cap-drop=all` | No Linux capabilities | Root inside the container can't change network, mount or kernel settings |
+| `--security-opt=no-new-privileges` | `setuid` binaries can't gain privileges | Closes the usual escalation path inside an image |
+| `--pids-limit=256`, `--memory=512m` | Process and memory limits | A runaway agent can't exhaust the machine |
+| `--log-driver=none` | Podman keeps no copy of the output | Output goes only to bobbin |
+| `--timeout=N` | Podman stops the container after N seconds | Set from the context deadline, such as the activity's start-to-close timeout |
+| `--env KEY=VALUE` | Sets a variable inside the container | Only the variables in `Spec.Env`; nothing is inherited from the host |
+
+There are no `--volume`, `--mount`, `--tmpfs`, `--device`, `--publish` or host-namespace flags, and `Spec` has no field that could carry one: a container sees only its image, arguments, environment and stdin. `TestInv_NoMounts` fails if any other flag-like string appears in the package, or a field is added to `Spec`.
+
+The `podman` process itself runs with a cleaned environment: variables that could point it at another machine, storage or configuration (`CONTAINER*`, `PODMAN*`) are dropped, and it runs in the C locale.
+
+## Where the overlay filesystem comes in
+
+A container's filesystem is the image's read-only layers plus one empty writable layer on top, joined by the kernel's overlay filesystem. Everything the agent writes, installs or deletes lands in that top layer. `--rm` deletes it with the container. The next call starts from the same read-only image with a new empty layer, so each step sees exactly the image, every time.
+
+The image is referenced by content: a full 64-hex image ID (with or without `sha256:`) or `name@sha256:<digest>`. Tags (`alpine:3.20`), short IDs and anything else are refused with `ErrInvalid` before Podman runs, because what they name can change.
+
+## Retries get a fresh container
+
+Inside a Temporal workflow, a step that fails is retried by Temporal's retry policy. With bobbin, the retry is a new `podman run`: a fresh container from the same image. A failed attempt can't leave files, processes or a half-written state for the retry to trip over. `TestContainer_RetryRunsInAFreshContainer` checks it: attempt 1 writes `/scratch` and exits 3; attempt 2 doesn't see `/scratch`.
+
+## Errors
+
+| Situation | `Run` returns | In a program (Temporal error type) | Retried? |
+|---|---|---|---|
+| Image not pinned, argument or variable with NUL or invalid UTF-8, bad variable name | `ErrInvalid` | `InvalidInput` | No |
+| `podman` not found; Podman exits 125 (its own error, such as image not known), 126 or 127 (command can't run) | `ErrSetup` | `ContainerSetup` | No |
+| More than `MaxOutput` (1 MiB) on stdout; the container is stopped | `ErrOutputTooLarge` | `OutputTooLarge` | No |
+| The agent exits with any other non-zero code | `*ExitError` with the code and the last 2 KiB of stderr | retryable | Yes, in a fresh container |
+| The context is cancelled | the context's error | | |
+
+Because 125–127 mean "Podman couldn't run it", an agent should avoid those exit codes for its own failures.
+
+## Outputs stay small
+
+An output becomes an activity result in Temporal's history, and then a file in the warp store. Both are meant for small values, so stdout is capped at 1 MiB. A step that produces something large should store it elsewhere and output a reference.
+
+## What isn't isolated
+
+- **The kernel.** On Linux, containers share the host's kernel; namespaces and cgroups separate them, but this isn't a virtual machine. On macOS, everything runs inside Podman's Linux VM, which is separate from macOS itself.
+- **CPU time and disk space.** There's no CPU quota, and the writable layer's size isn't limited. The context deadline bounds the run time.
+- **The image's contents.** bobbin runs exactly the image you pinned; it doesn't scan or verify it. Build images you trust (`FROM scratch` with a static binary is the smallest).
+
+**Planned:** a network allowlist for agents that must call specific services; CPU and disk quotas; signature verification for images from registries; a stronger sandbox (gVisor or Kata) as an option, through Podman's `--runtime`.
