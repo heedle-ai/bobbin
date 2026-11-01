@@ -13,6 +13,7 @@
 - [draft](https://github.com/heedle-ai/draft/wiki)
 - [shuttle](https://github.com/heedle-ai/shuttle/wiki)
 - [bobbin](https://github.com/heedle-ai/bobbin/wiki)
+- [reed](https://github.com/heedle-ai/reed/wiki)
 - [warp](https://github.com/heedle-ai/warp/wiki)
 - [drawdown](https://github.com/heedle-ai/drawdown/wiki)
 - [loom](https://github.com/heedle-ai/loom/wiki)
