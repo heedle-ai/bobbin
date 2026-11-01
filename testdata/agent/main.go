@@ -56,6 +56,21 @@ func main() {
 		}
 		sort.Strings(names)
 		fmt.Println(strings.Join(names, " "))
+	case "exit":
+		// Exit with the given code, as a step can: 125, 126 and 127
+		// included, which podman also uses for its own failures.
+		var code int
+		fmt.Sscan(os.Args[2], &code)
+		fmt.Fprintln(os.Stderr, "the step's own failure")
+		os.Exit(code)
+	case "spew":
+		// Write output forever; bobbin must stop the container.
+		line := []byte(strings.Repeat("x", 1023) + "\n")
+		for {
+			if _, err := os.Stdout.Write(line); err != nil {
+				return
+			}
+		}
 	case "fail":
 		fmt.Fprintln(os.Stderr, "something went wrong")
 		os.Exit(7)

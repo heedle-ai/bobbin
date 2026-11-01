@@ -76,7 +76,7 @@ func TestInv_CommandErrorsAreNonRetryable(t *testing.T) {
 	}{
 		{bobbin.Runner{}, `(container "alpine:latest")`, "InvalidInput"},
 		{bobbin.Runner{Podman: "/nonexistent/podman"}, `(container "` + zeros + `")`, "ContainerSetup"},
-		{bobbin.Runner{Podman: fakePodman(t, "exit 125")}, `(container "` + zeros + `")`, "ContainerSetup"},
+		{bobbin.Runner{Podman: fakePodman(t, "echo 'Error: image not known' >&2; exit 125")}, `(container "` + zeros + `")`, "ContainerSetup"},
 	} {
 		_, err := runProgram(t, c.r, c.src)
 		if app := findType(err, c.want); app == nil || !app.NonRetryable() {

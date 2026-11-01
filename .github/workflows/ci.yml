@@ -59,3 +59,6 @@ jobs:
           go test -count=1 -v -run 'TestContainer_' . | tee containers.log
           ! grep -q -- '--- SKIP' containers.log
           grep -q -- '--- PASS: TestContainer_RetryRunsInAFreshContainer' containers.log
+          grep -q -- '--- PASS: TestContainer_EndlessOutputIsStopped' containers.log
+          grep -q -- '--- PASS: TestContainer_NoHostEnvironment' containers.log
+          grep -q -- '--- PASS: TestContainer_StepExitCodesAreRetryable' containers.log

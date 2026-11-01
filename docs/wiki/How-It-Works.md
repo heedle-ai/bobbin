@@ -7,7 +7,7 @@
 ```text
 podman run --rm -i --pull=never --network=none --cap-drop=all
            --security-opt=no-new-privileges --pids-limit=256 --memory=512m
-           --log-driver=none [--timeout=N] [--env KEY=VALUE ...]
+           --log-driver=none --http-proxy=false [--timeout=N] [--env KEY=VALUE ...]
            IMAGE [ARGS ...]
 ```
 
@@ -23,6 +23,7 @@ Every flag comes before the image. Podman stops reading its own flags at the ima
 | `--security-opt=no-new-privileges` | `setuid` binaries can't gain privileges | Closes the usual escalation path inside an image |
 | `--pids-limit=256`, `--memory=512m` | Process and memory limits | A runaway agent can't exhaust the machine |
 | `--log-driver=none` | Podman keeps no copy of the output | Output goes only to bobbin |
+| `--http-proxy=false` | Podman doesn't copy the host's proxy variables in | By default it does, so a proxy URL with credentials would reach every agent (found in review 4) |
 | `--timeout=N` | Podman stops the container after N seconds | Set from the context deadline, such as the activity's start-to-close timeout |
 | `--env KEY=VALUE` | Sets a variable inside the container | Only the variables in `Spec.Env`; nothing is inherited from the host |
 
@@ -45,12 +46,12 @@ Inside a Temporal workflow, a step that fails is retried by Temporal's retry pol
 | Situation | `Run` returns | In a program (Temporal error type) | Retried? |
 |---|---|---|---|
 | Image not pinned, argument or variable with NUL or invalid UTF-8, bad variable name | `ErrInvalid` | `InvalidInput` | No |
-| `podman` not found; Podman exits 125 (its own error, such as image not known), 126 or 127 (command can't run) | `ErrSetup` | `ContainerSetup` | No |
+| `podman` not found; Podman exits 125 (its own error, such as image not known), 126 or 127 (command can't run), ending stderr with its `Error: ` line | `ErrSetup` | `ContainerSetup` | No |
 | More than `MaxOutput` (1 MiB) on stdout; the container is stopped | `ErrOutputTooLarge` | `OutputTooLarge` | No |
-| The agent exits with any other non-zero code | `*ExitError` with the code and the last 2 KiB of stderr | retryable | Yes, in a fresh container |
+| The agent exits with any other non-zero code, including its own 125–127 | `*ExitError` with the code and the last 2 KiB of stderr | retryable | Yes, in a fresh container |
 | The context is cancelled | the context's error | | |
 
-Because 125–127 mean "Podman couldn't run it", an agent should avoid those exit codes for its own failures.
+An agent can exit 125–127 itself; that's still its own, retryable failure. Only an exit that ends with Podman's own `Error: ` line counts as setup. An agent whose last stderr line starts with `Error: ` and that exits 125–127 is taken for a setup failure and not retried, so avoid that combination.
 
 ## Outputs stay small
 
@@ -60,6 +61,7 @@ An output becomes an activity result in Temporal's history, and then a file in t
 
 - **The kernel.** On Linux, containers share the host's kernel; namespaces and cgroups separate them, but this isn't a virtual machine. On macOS, everything runs inside Podman's Linux VM, which is separate from macOS itself.
 - **CPU time and disk space.** There's no CPU quota, and the writable layer's size isn't limited. The context deadline bounds the run time.
+- **The host's Podman configuration.** `containers.conf` on the host can add volumes, mounts or environment variables to every container, and Podman applies them to bobbin's too. bobbin can't switch those off from the command line (pointing Podman at an empty configuration would also drop the machine connection on macOS). Keep the configuration of the account that runs workers free of them.
 - **The image's contents.** bobbin runs exactly the image you pinned; it doesn't scan or verify it. Build images you trust (`FROM scratch` with a static binary is the smallest).
 
 **Planned:** a network allowlist for agents that must call specific services; CPU and disk quotas; signature verification for images from registries; a stronger sandbox (gVisor or Kata) as an option, through Podman's `--runtime`.
