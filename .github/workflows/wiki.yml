@@ -17,6 +17,8 @@ concurrency:
 
 jobs:
   publish:
+    # Private repos have no wiki on GitHub's free plan: skip, don't fail.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
