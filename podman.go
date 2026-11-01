@@ -115,7 +115,8 @@ func (s Spec) Argv(timeout time.Duration) []string {
 		"--security-opt=no-new-privileges", // setuid binaries can't gain any
 		"--pids-limit=" + strconv.Itoa(PidsLimit),
 		"--memory=" + MemoryLimit,
-		"--log-driver=none", // output goes only to us
+		"--log-driver=none",  // output goes only to us
+		"--http-proxy=false", // don't copy the host's proxy variables in
 	}
 	if timeout > 0 {
 		argv = append(argv, "--timeout="+strconv.Itoa(int(math.Ceil(timeout.Seconds()))))
@@ -174,12 +175,21 @@ func (r Runner) Run(ctx context.Context, s Spec) ([]byte, error) {
 	if !errors.As(err, &exit) {
 		return nil, fmt.Errorf("%w: %v", ErrSetup, err) // podman couldn't be started at all
 	}
-	switch code := exit.ExitCode(); code {
-	case 125, 126, 127:
+	// Podman uses 125 (its own error), 126 (can't run the command) and 127
+	// (command not found), and ends with an "Error: " line. A step can exit
+	// with those codes too; without podman's message, it's the step's own
+	// exit, and retryable.
+	code := exit.ExitCode()
+	if (code == 125 || code == 126 || code == 127) && podmanError(tail) {
 		return nil, fmt.Errorf("%w: podman exited %d: %s", ErrSetup, code, tail)
-	default:
-		return nil, &ExitError{Code: code, Stderr: tail}
 	}
+	return nil, &ExitError{Code: code, Stderr: tail}
+}
+
+// podmanError reports whether stderr ends with podman's own error line.
+func podmanError(stderr string) bool {
+	lines := strings.Split(strings.TrimSpace(stderr), "\n")
+	return strings.HasPrefix(lines[len(lines)-1], "Error: ")
 }
 
 // cleanEnv drops variables that could point podman somewhere else (a

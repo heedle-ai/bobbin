@@ -52,12 +52,12 @@ func TestInv_ExactPodmanCommandLine(t *testing.T) {
 	}
 	want := []string{"run", "--rm", "-i", "--pull=never", "--network=none", "--cap-drop=all",
 		"--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m", "--log-driver=none",
-		"--env", "A=--privileged", "--env", "B=2", zeros, "--volume=/:/host", "-v", "/:/h"}
+		"--http-proxy=false", "--env", "A=--privileged", "--env", "B=2", zeros, "--volume=/:/host", "-v", "/:/h"}
 	if got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n"); !reflect.DeepEqual(got, want) {
 		t.Errorf("podman argv\n got  %q\n want %q", got, want)
 	}
-	if got := s.Argv(90 * time.Second); got[10] != "--timeout=90" {
-		t.Errorf("with a deadline, argv[10] = %q, want --timeout=90", got[10])
+	if got := s.Argv(90 * time.Second); got[11] != "--timeout=90" {
+		t.Errorf("with a deadline, argv[11] = %q, want --timeout=90", got[10])
 	}
 }
 
@@ -68,7 +68,7 @@ func TestInv_ExactPodmanCommandLine(t *testing.T) {
 func TestInv_NoMounts(t *testing.T) {
 	allowed := map[string]bool{"-i": true, "--rm": true, "--pull=never": true, "--network=none": true,
 		"--cap-drop=all": true, "--security-opt=no-new-privileges": true, "--pids-limit=": true,
-		"--memory=": true, "--log-driver=none": true, "--timeout=": true, "--env": true}
+		"--memory=": true, "--log-driver=none": true, "--http-proxy=false": true, "--timeout=": true, "--env": true}
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 	if err != nil {
@@ -156,19 +156,28 @@ func TestInv_ImagesArePinned(t *testing.T) {
 	}
 }
 
-// TestInv_ExitCodesAreClassified: podman's own failures (125, 126, 127)
-// are ErrSetup; any other exit is a retryable ExitError carrying the end
-// of stderr, at most StderrTail bytes.
+// TestInv_ExitCodesAreClassified: podman's own failures (125, 126, 127
+// with podman's "Error: " line) are ErrSetup; any other exit, including a
+// step's own 125-127, is a retryable ExitError carrying the end of stderr,
+// at most StderrTail bytes. (Review 4: a step exiting 125 was non-retryable.)
 func TestInv_ExitCodesAreClassified(t *testing.T) {
-	for code, setup := range map[int]bool{1: false, 3: false, 7: false, 125: true, 126: true, 127: true, 137: false} {
-		r := bobbin.Runner{Podman: fakePodman(t, "head -c 5000 /dev/zero | tr '\\0' x >&2; echo boom >&2; exit "+strconv.Itoa(code))}
+	for _, c := range []struct {
+		code  int
+		last  string
+		setup bool
+	}{
+		{1, "boom", false}, {3, "boom", false}, {7, "boom", false}, {137, "boom", false},
+		{125, "boom", false}, {126, "boom", false}, {127, "boom", false},
+		{125, "Error: image not known", true}, {126, "Error: permission denied", true}, {127, "Error: executable file not found", true},
+	} {
+		r := bobbin.Runner{Podman: fakePodman(t, "head -c 5000 /dev/zero | tr '\\0' x >&2; echo >&2; echo '"+c.last+"' >&2; exit "+strconv.Itoa(c.code))}
 		_, err := r.Run(ctx, bobbin.Spec{Image: zeros})
 		var exit *bobbin.ExitError
 		switch {
-		case setup && !errors.Is(err, bobbin.ErrSetup):
-			t.Errorf("exit %d: %v, want ErrSetup", code, err)
-		case !setup && (!errors.As(err, &exit) || exit.Code != code || len(exit.Stderr) > bobbin.StderrTail || !strings.HasSuffix(exit.Stderr, "boom")):
-			t.Errorf("exit %d: %v, want ExitError with the stderr tail", code, err)
+		case c.setup && !errors.Is(err, bobbin.ErrSetup):
+			t.Errorf("exit %d %q: %v, want ErrSetup", c.code, c.last, err)
+		case !c.setup && (!errors.As(err, &exit) || exit.Code != c.code || len(exit.Stderr) > bobbin.StderrTail || !strings.HasSuffix(exit.Stderr, c.last)):
+			t.Errorf("exit %d %q: %v, want ExitError with the stderr tail", c.code, c.last, err)
 		}
 	}
 }

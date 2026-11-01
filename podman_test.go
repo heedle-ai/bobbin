@@ -8,9 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/heedle-ai/bobbin"
 )
@@ -107,10 +109,48 @@ func TestContainer_NoNetwork(t *testing.T) {
 func TestContainer_NoHostEnvironment(t *testing.T) {
 	img := testImage(t)
 	t.Setenv("BOBBIN_HOST_SECRET", "s3cret")
+	// Podman copies proxy variables in by default; bobbin turns that off.
+	// (Review 4: a proxy URL with credentials reached the container.)
+	for _, k := range []string{"HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "FTP_PROXY"} {
+		t.Setenv(k, "http://user:s3cret@proxy:3128")
+	}
 	got := run(t, bobbin.Spec{Image: img, Args: []string{"env"}, Env: map[string]string{"MINE": "1"}})
-	if strings.Contains(got, "BOBBIN_HOST_SECRET") || !strings.Contains(got, "MINE") {
+	if strings.Contains(got, "BOBBIN_HOST_SECRET") || strings.Contains(strings.ToUpper(got), "PROXY") || !strings.Contains(got, "MINE") {
 		t.Errorf("container environment: %q", got)
 	}
+}
+
+// A step that exits 125, 126 or 127 itself is an ordinary, retryable
+// failure; only podman's own failures are ErrSetup. (Review 4.)
+func TestContainer_StepExitCodesAreRetryable(t *testing.T) {
+	img := testImage(t)
+	for _, code := range []string{"125", "126", "127"} {
+		_, err := bobbin.Runner{}.Run(ctx, bobbin.Spec{Image: img, Args: []string{"exit", code}})
+		var exit *bobbin.ExitError
+		if !errors.As(err, &exit) || strconv.Itoa(exit.Code) != code {
+			t.Errorf("step exiting %s: %v, want a retryable ExitError", code, err)
+		}
+	}
+}
+
+// Endless output stops the container: Run returns ErrOutputTooLarge
+// promptly and no container is left running. (Review 4: the fake podman
+// stopped by itself, so the stop was never tested.)
+func TestContainer_EndlessOutputIsStopped(t *testing.T) {
+	img := testImage(t)
+	start := time.Now()
+	_, err := bobbin.Runner{}.Run(ctx, bobbin.Spec{Image: img, Args: []string{"spew"}})
+	if !errors.Is(err, bobbin.ErrOutputTooLarge) || time.Since(start) > 30*time.Second {
+		t.Fatalf("err = %v after %v, want ErrOutputTooLarge promptly", err, time.Since(start))
+	}
+	for i := 0; i < 50; i++ {
+		out, _ := exec.Command("podman", "ps", "-q", "--filter", "ancestor="+img).Output()
+		if strings.TrimSpace(string(out)) == "" {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("the container is still running")
 }
 
 // A command that fails is a retryable ExitError with its stderr; an image

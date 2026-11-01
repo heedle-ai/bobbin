@@ -8,7 +8,7 @@ An agent is any program in a container image. bobbin runs it once per step, in a
 | **Standard input** | A JSON object: each upstream node ID mapped to its output, keys sorted. `{}` when the step has no upstream |
 | **Environment** | `HEEDLE_NODE`: this step's node ID (`n2`). `HEEDLE_ATTEMPT`: Temporal's attempt number, from 1. Nothing from the host |
 | **Standard output** | The step's output, at most 1 MiB |
-| **Exit code** | 0 for success. Any other code except 125–127 fails the step, and Temporal retries it in a fresh container |
+| **Exit code** | 0 for success. Any other code fails the step, and Temporal retries it in a fresh container (unless the last stderr line starts with `Error: ` and the code is 125–127, which reads as Podman's own setup error) |
 | **Filesystem** | The image, plus an empty writable layer that is deleted afterwards |
 | **Network** | None |
 
