@@ -52,6 +52,11 @@ for n, line in enumerate(open(INV, encoding="utf-8"), 1):
         err(f"{INV}:{n}: duplicate ID {rid}")
     ids.add(rid)
     g = GUARD.findall(guards)
+    for t in g:
+        # They skip where Podman isn't installed, e.g. on macOS runners, so
+        # they guard through the CI step that requires them to pass.
+        if t.startswith("TestContainer_"):
+            err(f"{INV}:{n}: {rid} names {t}; container tests guard through ci:containers, which fails if they skip")
     if not g:
         err(f"{INV}:{n}: {rid} has no guard in its 'Guarded by' column")
     rows.append((rid, g))
