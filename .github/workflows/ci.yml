@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    # bash -eo pipefail: a failing command in a pipe fails the step
+    # (the default, bash -e, ignores it).
+    shell: bash
+
 jobs:
   test:
     strategy:
@@ -64,7 +70,7 @@ jobs:
           tar -xzf "$RUNNER_TEMP/reg.tgz" -C "$RUNNER_TEMP/bin" registry
           export PATH="$RUNNER_TEMP/bin:$PATH"
           go test -count=1 -v -run 'TestContainer_' . | tee containers.log
-          ! grep -q -- '--- SKIP' containers.log
+          if grep -q -- '--- SKIP' containers.log; then echo 'a test skipped'; exit 1; fi
           grep -q -- '--- PASS: TestContainer_RetryRunsInAFreshContainer' containers.log
           grep -q -- '--- PASS: TestContainer_EndlessOutputIsStopped' containers.log
           grep -q -- '--- PASS: TestContainer_NoHostEnvironment' containers.log

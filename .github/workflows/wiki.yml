@@ -15,6 +15,12 @@ concurrency:
   group: wiki
   cancel-in-progress: false
 
+defaults:
+  run:
+    # bash -eo pipefail: a failing command in a pipe fails the step
+    # (the default, bash -e, ignores it).
+    shell: bash
+
 jobs:
   publish:
     # Private repos have no wiki on GitHub's free plan: skip, don't fail.
