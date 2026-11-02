@@ -208,22 +208,66 @@ func (s *Session) Write(ctx context.Context, path string, data []byte) error {
 // Read returns the contents of path in the session, at most max bytes:
 // ErrOutputTooLarge if it's longer.
 func (s *Session) Read(ctx context.Context, path string, max int) ([]byte, error) {
+	var buf bytes.Buffer
+	if _, err := s.ReadTo(ctx, path, &buf, int64(max)); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// ReadTo streams the contents of path in the session to w, and returns
+// how many bytes it wrote: at most max, or ErrOutputTooLarge if the file
+// is longer (w then holds a cut-off prefix, which callers must discard).
+// It reads through podman exec, like every other session command, so a
+// file of any size leaves the container without touching the host's
+// paths.
+func (s *Session) ReadTo(ctx context.Context, path string, w io.Writer, max int64) (int64, error) {
 	cmd := exec.CommandContext(ctx, s.podman, s.ExecArgv(`cat -- "$1"`, path)...)
 	cmd.Env = cleanEnv(os.Environ())
-	out := &capped{max: max, onFull: func() { _ = cmd.Process.Signal(syscall.SIGTERM) }}
+	out := &limited{w: w, max: max, stop: func() { _ = cmd.Process.Signal(syscall.SIGTERM) }}
 	stderr := &tail{max: StderrTail}
 	cmd.Stdout, cmd.Stderr = out, stderr
 	err := cmd.Run()
-	if out.full {
-		return nil, fmt.Errorf("%w: %s is more than %d bytes", ErrOutputTooLarge, path, max)
+	switch {
+	case out.full:
+		return out.n, fmt.Errorf("%w: %s is more than %d bytes", ErrOutputTooLarge, path, max)
+	case out.err != nil:
+		return out.n, fmt.Errorf("bobbin: reading %s: %w", path, out.err)
+	case err != nil && ctx.Err() != nil:
+		return out.n, ctx.Err()
+	case err != nil:
+		return out.n, fmt.Errorf("bobbin: reading %s: %v: %s", path, err, strings.TrimSpace(string(stderr.buf)))
 	}
+	return out.n, nil
+}
+
+// limited passes at most max bytes to w; past that, or when w fails, it
+// stops the writer and drops the rest.
+type limited struct {
+	w    io.Writer
+	max  int64
+	n    int64
+	full bool
+	err  error
+	stop func()
+}
+
+func (l *limited) Write(p []byte) (int, error) {
+	if l.full || l.err != nil {
+		return len(p), nil
+	}
+	if l.n+int64(len(p)) > l.max {
+		l.full = true
+		l.stop()
+		return len(p), nil
+	}
+	n, err := l.w.Write(p)
+	l.n += int64(n)
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("bobbin: reading %s: %v: %s", path, err, strings.TrimSpace(string(stderr.buf)))
+		l.err = err
+		l.stop()
 	}
-	return out.buf.Bytes(), nil
+	return len(p), nil
 }
 
 // Change is one path the session added, changed or deleted, relative to

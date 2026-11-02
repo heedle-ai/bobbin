@@ -2,7 +2,10 @@ package bobbin_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -172,5 +175,41 @@ func TestContainer_SessionEndsAtItsDeadline(t *testing.T) {
 	if exists(s.Name()) {
 		s.Close()
 		t.Error("a session outlived its deadline")
+	}
+}
+
+type failingWriter struct{ after int }
+
+func (f *failingWriter) Write(p []byte) (int, error) {
+	if f.after -= len(p); f.after < 0 {
+		return 0, errors.New("disk full")
+	}
+	return len(p), nil
+}
+
+// TestContainer_ReadToStreamsLargeFiles: ReadTo copies a file far larger
+// than Read's limits out of the session byte for byte, refuses one longer
+// than max with ErrOutputTooLarge, and reports a writer that fails.
+func TestContainer_ReadToStreamsLargeFiles(t *testing.T) {
+	img := shellImage(t)
+	s, err := bobbin.Runner{}.Start(ctx, bobbin.Spec{Image: img})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if res, err := s.Exec(ctx, `head -c 3000000 /dev/urandom > big.bin`, nil); err != nil || res.ExitCode != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	h := sha256.New()
+	n, err := s.ReadTo(ctx, "/work/big.bin", h, 3000000)
+	sum, _ := s.Exec(ctx, `sha256sum big.bin`, nil)
+	if err != nil || n != 3000000 || !strings.HasPrefix(sum.Stdout, hex.EncodeToString(h.Sum(nil))) {
+		t.Errorf("ReadTo: %d bytes, %v; container says %s", n, err, sum.Stdout)
+	}
+	if _, err := s.ReadTo(ctx, "/work/big.bin", io.Discard, 2999999); !errors.Is(err, bobbin.ErrOutputTooLarge) {
+		t.Errorf("one byte too long: %v", err)
+	}
+	if _, err := s.ReadTo(ctx, "/work/big.bin", &failingWriter{after: 100000}, 3000000); err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("failing writer: %v", err)
 	}
 }

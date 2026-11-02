@@ -67,3 +67,4 @@ jobs:
           grep -q -- '--- PASS: TestContainer_CancelledExecEndsWithTheSession' containers.log
           grep -q -- '--- PASS: TestContainer_StopEndsLeftoverCommands' containers.log
           grep -q -- '--- PASS: TestContainer_SessionEndsAtItsDeadline' containers.log
+          grep -q -- '--- PASS: TestContainer_ReadToStreamsLargeFiles' containers.log
