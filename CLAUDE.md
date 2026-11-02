@@ -54,8 +54,9 @@ why the existing tool can't do it.
 - bobbin is a thin layer over the `podman` CLI, the way warp is over `git`.
   It never talks to a container engine's API or reimplements isolation.
 - Every run is a new container (`podman run --rm`), from an image pinned by
-  content (a full image ID or `name@sha256:`). Never add a way to reuse a
-  container between runs.
+  content (a full image ID or `name@sha256:`). A `Session` is one new
+  container for one step's commands (an agent's workspace), removed by
+  `Close`. Never add a way to reuse a container between steps or runs.
 - Nothing from the host goes in: no volumes, mounts, ports, devices, host
   namespaces or host environment. `Spec` has no field for them, and
   `TestInv_NoMounts` fails if a new flag or field appears. Above all, a warp
