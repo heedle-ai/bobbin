@@ -46,6 +46,7 @@ An agent step runs many commands, each building on the last: write a file, run a
 | `Start(spec)` | `podman run --detach --rm …`, then `podman exec … /bin/mkdir -p /work` | Starts the container with `/bin/sh` waiting, and creates `/work` |
 | `Exec(command, stdin)` | `podman exec --interactive --workdir /work … /bin/sh -c command` | Runs one command in `/work`; its exit code, and up to 64 KiB each of standard output and error, are the result |
 | `Write(path, data)` / `Read(path, max)` | `podman exec … cat` | Puts a file in, or reads one out; the path is an argument, never part of a command |
+| `ReadTo(path, w, max)` | `podman exec … cat` | Streams a file of any size out to a writer, up to `max` bytes, so a large file never has to fit in memory |
 | `Diff()` | `podman diff --format json` | Lists every path the session added, changed or deleted, relative to the image |
 | `Stop()` | `podman exec … kill -9 -1` | Kills commands left running, keeping the files |
 | `Close()` | `podman rm --force --time 0 --ignore` | Removes the container and everything in it |
