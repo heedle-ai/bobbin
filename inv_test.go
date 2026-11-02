@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -68,7 +69,12 @@ func TestInv_ExactPodmanCommandLine(t *testing.T) {
 func TestInv_NoMounts(t *testing.T) {
 	allowed := map[string]bool{"-i": true, "--rm": true, "--pull=never": true, "--network=none": true,
 		"--cap-drop=all": true, "--security-opt=no-new-privileges": true, "--pids-limit=": true,
-		"--memory=": true, "--log-driver=none": true, "--http-proxy=false": true, "--timeout=": true, "--env": true}
+		"--memory=": true, "--log-driver=none": true, "--http-proxy=false": true, "--timeout=": true, "--env": true,
+		// Sessions: run detached, named and labelled, with a shell; exec,
+		// diff, rm and ps flags. None mounts, publishes or shares anything.
+		"--detach": true, "--name": true, "--label": true, "--entrypoint": true, "-c": true,
+		"--interactive": true, "--workdir": true, "--format": true, "--force": true, "--time": true,
+		"--ignore": true}
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 	if err != nil {
@@ -98,7 +104,7 @@ func TestInv_NoMounts(t *testing.T) {
 }
 
 // TestInv_OnlyPodmanRunsProcesses: bobbin's own imports are an allowlist,
-// and only podman.go starts a process.
+// and only podman.go and session.go start processes.
 func TestInv_OnlyPodmanRunsProcesses(t *testing.T) {
 	out, err := exec.Command("go", "list", "-f", `{{join .Imports "\n"}}`, ".").Output()
 	if err != nil {
@@ -117,7 +123,7 @@ func TestInv_OnlyPodmanRunsProcesses(t *testing.T) {
 	}
 	files, _ := filepath.Glob("*.go")
 	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") || name == "podman.go" {
+		if strings.HasSuffix(name, "_test.go") || name == "podman.go" || name == "session.go" {
 			continue
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.ImportsOnly)
@@ -126,7 +132,7 @@ func TestInv_OnlyPodmanRunsProcesses(t *testing.T) {
 		}
 		for _, im := range f.Imports {
 			if p, _ := strconv.Unquote(im.Path.Value); p == "os/exec" || p == "syscall" {
-				t.Errorf("%s imports %s; only podman.go starts processes", name, p)
+				t.Errorf("%s imports %s; only podman.go and session.go start processes", name, p)
 			}
 		}
 	}
@@ -223,5 +229,82 @@ func TestInv_OutputIsBounded(t *testing.T) {
 	var exit *bobbin.ExitError
 	if !errors.As(err, &exit) || len(exit.Stderr) > bobbin.StderrTail || !strings.HasSuffix(exit.Stderr, "end") {
 		t.Errorf("10 MB of stderr: %v", err)
+	}
+}
+
+// TestInv_ExactSessionCommandLines: a session's container is started with
+// the same hardening as a single run (no network, no capabilities, limits,
+// nothing mounted), named and labelled so it can be found and swept, with
+// /bin/sh doing nothing until it's removed; commands, writes and reads go
+// through podman exec with every path an argument, never part of a
+// command; Close removes it, whatever happened.
+func TestInv_ExactSessionCommandLines(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "log")
+	podman := fakePodman(t, `printf '%s\n' "$*" >> `+log+`; case "$1" in exec) cat > /dev/null; echo out; echo err >&2;; esac`)
+	s := bobbin.Spec{Image: zeros, Env: map[string]string{"HEEDLE_NODE": "n0"}}
+	ss, err := bobbin.Runner{Podman: podman}.Start(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := ss.Name()
+	if !regexp.MustCompile(`^bobbin-session-[0-9a-f]{16}$`).MatchString(name) {
+		t.Fatalf("session name %q", name)
+	}
+	res, err := ss.Exec(ctx, "ls -la", []byte("in"))
+	if err != nil || res.Stdout != "out\n" || res.Stderr != "err\n" || res.ExitCode != 0 {
+		t.Errorf("exec = %+v, %v", res, err)
+	}
+	if err := ss.Write(ctx, "/in/n0.txt", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ss.Write(ctx, "relative", nil); !errors.Is(err, bobbin.ErrInvalid) {
+		t.Errorf("relative write: %v", err)
+	}
+	ss.Close()
+	b, _ := os.ReadFile(log)
+	want := "run --detach --rm --name " + name + " --label bobbin.session=1 --pull=never --network=none --cap-drop=all " +
+		"--security-opt=no-new-privileges --pids-limit=256 --memory=512m --log-driver=none --http-proxy=false --timeout=1800 " +
+		"--entrypoint /bin/sh --env HEEDLE_NODE=n0 " + zeros + " -c trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done\n" +
+		"exec " + name + " /bin/sh -c mkdir -p /work\n" +
+		"exec --interactive --workdir /work " + name + " /bin/sh -c ls -la sh\n" +
+		"exec --interactive --workdir /work " + name + ` /bin/sh -c mkdir -p "$(dirname "$1")" && cat > "$1" sh /in/n0.txt` + "\n" +
+		"rm --force --time 0 --ignore " + name + "\n"
+	if string(b) != want {
+		t.Errorf("podman calls:\n%s\nwant\n%s", b, want)
+	}
+	if _, err := (bobbin.Runner{Podman: podman}).Start(ctx, bobbin.Spec{Image: zeros, Args: []string{"x"}}); !errors.Is(err, bobbin.ErrInvalid) {
+		t.Errorf("a session with arguments: %v", err)
+	}
+}
+
+// TestInv_SessionOutputIsBounded: each of a command's outputs keeps at
+// most MaxExecOutput bytes and says it was cut; a read past its limit is
+// an error, never a short read; and only podman's own last line on
+// standard error makes a failed command a setup error.
+func TestInv_SessionOutputIsBounded(t *testing.T) {
+	podman := fakePodman(t, `case "$1" in exec) head -c 200000 /dev/zero; head -c 70000 /dev/zero >&2;; esac`)
+	ss, err := bobbin.Runner{Podman: podman}.Start(ctx, bobbin.Spec{Image: zeros})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	res, err := ss.Exec(ctx, "x", nil)
+	if err != nil || len(res.Stdout) != bobbin.MaxExecOutput || len(res.Stderr) != bobbin.MaxExecOutput || !res.Truncated {
+		t.Errorf("exec: %d and %d bytes, truncated %v, %v", len(res.Stdout), len(res.Stderr), res.Truncated, err)
+	}
+	if _, err := ss.Read(ctx, "/work/big", 1000); !errors.Is(err, bobbin.ErrOutputTooLarge) {
+		t.Errorf("read past its limit: %v", err)
+	}
+	// 100 KiB of standard error ending in podman's error line: the cut head
+	// doesn't hold it, but it's still recognised.
+	broken := fakePodman(t, `case "$*" in *"mkdir -p /work"*) exit 0;; esac
+case "$1" in exec) head -c 100000 /dev/zero | tr '\\0' x >&2; echo >&2; echo "Error: no such container" >&2; exit 125;; esac`)
+	bs, err := bobbin.Runner{Podman: broken}.Start(ctx, bobbin.Spec{Image: zeros})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bs.Close()
+	if _, err := bs.Exec(ctx, "x", nil); !errors.Is(err, bobbin.ErrSetup) {
+		t.Errorf("podman's error after long stderr: %v", err)
 	}
 }

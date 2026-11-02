@@ -37,6 +37,21 @@ A container's filesystem is the image's read-only layers plus one empty writable
 
 The image is referenced by content: a full 64-hex image ID (with or without `sha256:`) or `name@sha256:<digest>`. Tags (`alpine:3.20`), short IDs and anything else are refused with `ErrInvalid` before Podman runs, because what they name can change.
 
+## Sessions: one workspace for one step's commands
+
+An agent step runs many commands, each building on the last: write a file, run a script on it, read the result. For that, `Runner.Start` starts a **session**: one fresh container with exactly the same hardening as a single run (no network, no Linux capabilities, process and memory limits, nothing mounted, nothing inherited from the machine), named `bobbin-session-<random>` and labelled `bobbin.session=1`.
+
+| Call | Podman | What it does |
+|---|---|---|
+| `Start(spec)` | `podman run --detach --rm …`, then `podman exec … /bin/mkdir -p /work` | Starts the container with `/bin/sh` waiting, and creates `/work` |
+| `Exec(command, stdin)` | `podman exec --interactive --workdir /work … /bin/sh -c command` | Runs one command in `/work`; its exit code, and up to 64 KiB each of standard output and error, are the result |
+| `Write(path, data)` / `Read(path, max)` | `podman exec … cat` | Puts a file in, or reads one out; the path is an argument, never part of a command |
+| `Diff()` | `podman diff --format json` | Lists every path the session added, changed or deleted, relative to the image |
+| `Stop()` | `podman exec … kill -9 -1` | Kills commands left running, keeping the files |
+| `Close()` | `podman rm --force --time 0 --ignore` | Removes the container and everything in it |
+
+The image needs `/bin/sh`, and either a `/work` the container's user can write or permission to create it. With every capability dropped, root inside a bare `FROM scratch` image can't create directories at the top level, so such images should include `/work`. `Stop()` kills every process the session's commands left running (`kill -9 -1` inside it): a command cut off by its context otherwise keeps running. A session lasts at most 30 minutes (`MaxSessionLife`, or its context's deadline): Podman stops it then (`--timeout`) and `--rm` removes it, so even a session whose worker died never outlives it. One session is one step's workspace: it's never reused for another step or run.
+
 ## Retries get a fresh container
 
 Inside a Temporal workflow, a step that fails is retried by Temporal's retry policy. With bobbin, the retry is a new `podman run`: a fresh container from the same image. A failed attempt can't leave files, processes or a half-written state for the retry to trip over. `TestContainer_RetryRunsInAFreshContainer` checks it: attempt 1 writes `/scratch` and exits 3; attempt 2 doesn't see `/scratch`.
@@ -60,7 +75,8 @@ An output becomes an activity result in Temporal's history, and then a file in t
 ## What isn't isolated
 
 - **The kernel.** On Linux, containers share the host's kernel; namespaces and cgroups separate them, but this isn't a virtual machine. On macOS, everything runs inside Podman's Linux VM, which is separate from macOS itself.
-- **CPU time and disk space.** There's no CPU quota, and the writable layer's size isn't limited. The context deadline bounds the run time.
+- **CPU time and disk space.** There's no CPU quota, and the writable layer's size isn't limited. The context deadline bounds the run time. This matters more for sessions, whose commands an agent chooses for up to 30 minutes: a command can fill the disk Podman's storage is on.
+- **Rootful Podman.** Run workers with rootless Podman. Under rootful Podman, root in a container is root on the host minus its capabilities; rootless maps it to your own user.
 - **The host's Podman configuration.** `containers.conf` on the host can add volumes, mounts or environment variables to every container, and Podman applies them to bobbin's too. bobbin can't switch those off from the command line (pointing Podman at an empty configuration would also drop the machine connection on macOS). Keep the configuration of the account that runs workers free of them.
 - **The image's contents.** bobbin runs exactly the image you pinned; it doesn't scan or verify it. Build images you trust (`FROM scratch` with a static binary is the smallest).
 

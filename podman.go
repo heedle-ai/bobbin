@@ -148,10 +148,7 @@ func (r Runner) Run(ctx context.Context, s Spec) ([]byte, error) {
 			return nil, ctx.Err()
 		}
 	}
-	podman := r.Podman
-	if podman == "" {
-		podman = "podman"
-	}
+	podman := r.podman()
 	cmd := exec.CommandContext(ctx, podman, s.Argv(timeout)...)
 	cmd.Env = cleanEnv(os.Environ())
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }

@@ -55,6 +55,7 @@ jobs:
         env:
           BOBBIN_REQUIRE_PODMAN: "1"
         run: |
+          sudo apt-get update -q >/dev/null && sudo apt-get install -y busybox-static >/dev/null   # a shell for session images
           podman --version
           go test -count=1 -v -run 'TestContainer_' . | tee containers.log
           ! grep -q -- '--- SKIP' containers.log
@@ -62,3 +63,7 @@ jobs:
           grep -q -- '--- PASS: TestContainer_EndlessOutputIsStopped' containers.log
           grep -q -- '--- PASS: TestContainer_NoHostEnvironment' containers.log
           grep -q -- '--- PASS: TestContainer_StepExitCodesAreRetryable' containers.log
+          grep -q -- '--- PASS: TestContainer_SessionIsOneFreshWorkspace' containers.log
+          grep -q -- '--- PASS: TestContainer_CancelledExecEndsWithTheSession' containers.log
+          grep -q -- '--- PASS: TestContainer_StopEndsLeftoverCommands' containers.log
+          grep -q -- '--- PASS: TestContainer_SessionEndsAtItsDeadline' containers.log
