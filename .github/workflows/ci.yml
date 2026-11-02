@@ -57,6 +57,12 @@ jobs:
         run: |
           sudo apt-get update -q >/dev/null && sudo apt-get install -y busybox-static >/dev/null   # a shell for session images
           podman --version
+          # The distribution project's registry, pinned by hash, for the push test.
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -sSfLo "$RUNNER_TEMP/reg.tgz" https://github.com/distribution/distribution/releases/download/v3.0.0/registry_3.0.0_linux_amd64.tar.gz
+          echo "61c9a2c0d5981a78482025b6b69728521fbc78506d68b223d4a2eb825de5ca3d  $RUNNER_TEMP/reg.tgz" | sha256sum -c
+          tar -xzf "$RUNNER_TEMP/reg.tgz" -C "$RUNNER_TEMP/bin" registry
+          export PATH="$RUNNER_TEMP/bin:$PATH"
           go test -count=1 -v -run 'TestContainer_' . | tee containers.log
           ! grep -q -- '--- SKIP' containers.log
           grep -q -- '--- PASS: TestContainer_RetryRunsInAFreshContainer' containers.log
@@ -68,3 +74,5 @@ jobs:
           grep -q -- '--- PASS: TestContainer_StopEndsLeftoverCommands' containers.log
           grep -q -- '--- PASS: TestContainer_SessionEndsAtItsDeadline' containers.log
           grep -q -- '--- PASS: TestContainer_ReadToStreamsLargeFiles' containers.log
+          grep -q -- '--- PASS: TestContainer_ImageBuildIsSandboxed' containers.log
+          grep -q -- '--- PASS: TestContainer_ImagePushes' containers.log

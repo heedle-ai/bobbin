@@ -53,6 +53,39 @@ An agent step runs many commands, each building on the last: write a file, run a
 
 The image needs `/bin/sh`, and either a `/work` the container's user can write or permission to create it. With every capability dropped, root inside a bare `FROM scratch` image can't create directories at the top level, so such images should include `/work`. `Stop()` kills every process the session's commands left running (`kill -9 -1` inside it): a command cut off by its context otherwise keeps running. A session lasts at most 30 minutes (`MaxSessionLife`, or its context's deadline): Podman stops it then (`--timeout`) and `--rm` removes it, so even a session whose worker died never outlives it. One session is one step's workspace: it's never reused for another step or run.
 
+## Image builds
+
+The `image` command builds an image with `podman build`, from a Containerfile written in the program:
+
+```lisp
+(pipe (agent "Write app.json for the service.")
+      (image "FROM docker.io/library/alpine@sha256:<digest>
+COPY in/n0.txt /app/agent-result.json"))
+```
+
+Its build context is a fresh temporary directory holding only the Containerfile and `in/<node>.txt` for each input, so `COPY` sees what earlier steps produced and nothing else from the worker. The build runs exactly as `BuildArgv` says:
+
+| Flag | Why |
+|---|---|
+| `--pull=never` | Only images already on the worker: every base must be pinned to content, so the same Containerfile always starts from the same bytes |
+| `--network=none` | `RUN` steps have no network |
+| `--security-opt=no-new-privileges` | setuid binaries gain nothing |
+| `--memory=2g` | Bounded memory (more than a step's container: compilers run here) |
+| `--http-proxy=false` | The worker's proxy variables stay out |
+| `--timestamp=0`, `--identity-label=false` | The same build gives the same image ID |
+
+`RUN` steps keep Podman's default, reduced capabilities rather than none: package managers need to own and chmod files, and dropping them all would break ordinary builds.
+
+Before building, `CheckContainerfile` refuses anything it can't read with certainty, since Podman, not bobbin, is the parser: a `FROM` or `COPY --from` that isn't `scratch`, an earlier stage or an image pinned to content (`name@sha256:…` or a full image ID); flags on `FROM` or `RUN` (such as `RUN --network` or `--mount`); `ADD` (it fetches URLs and unpacks archives: use `COPY`); `ONBUILD`; parser directives (`# escape=`, `# syntax=`); and heredocs.
+
+The output is JSON, `{"image": "sha256:<hex>"}`: an image ID that a later program can run with `(container "<that ID>" …)`. Built images stay in the worker's Podman storage; `podman image prune` removes unused ones.
+
+### Publishing
+
+`(image "<Containerfile>" "push")` also pushes the image, and only then: to the worker's `-image-registry` repository (such as `ghcr.io/acme/heedle-images`), tagged `sha256-<hex>`, with the worker's own `podman login`. The program never sees the credentials, and without a registry the step fails at once with `ImageSetup`. The output gains `"pushed": "<repo>@sha256:<manifest digest>"`.
+
+A build or push that fails is retryable; a Containerfile the check refuses fails with `InvalidInput`, and a base image the worker doesn't have with `ContainerSetup`. The step's plan node carries a 30-minute timeout (`ImageOptions`).
+
 ## Retries get a fresh container
 
 Inside a Temporal workflow, a step that fails is retried by Temporal's retry policy. With bobbin, the retry is a new `podman run`: a fresh container from the same image. A failed attempt can't leave files, processes or a half-written state for the retry to trip over. `TestContainer_RetryRunsInAFreshContainer` checks it: attempt 1 writes `/scratch` and exits 3; attempt 2 doesn't see `/scratch`.
