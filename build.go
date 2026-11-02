@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openshift/imagebuilder/dockerfile/parser"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 
@@ -24,6 +25,11 @@ const (
 	ImageCommandName  = "image" // in draft programs
 	ImageActivityName = "Image" // in Temporal
 )
+
+// BuildCPUSeconds is the CPU time each RUN process may use. It also ends
+// a busy loop left running by a cancelled build, which podman doesn't
+// stop (see How-It-Works).
+const BuildCPUSeconds = "1800"
 
 // BuildMemoryLimit is the memory a build's RUN steps may use: more than a
 // step's container, since compilers and package managers run there.
@@ -50,100 +56,123 @@ var (
 	// pirn and loom use for registries.
 	imageRepo = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+$`)
 	imageID   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	directive = regexp.MustCompile(`(?i)^\s*#\s*(escape|syntax|check)\s*=`)
 )
 
+// containerfileInstructions are the instructions a Containerfile may use.
+// ADD (it fetches URLs and unpacks archives) and ONBUILD aren't among them.
+var containerfileInstructions = map[string]bool{
+	"from": true, "run": true, "copy": true, "workdir": true, "env": true, "label": true, "cmd": true,
+	"entrypoint": true, "user": true, "expose": true, "arg": true, "stopsignal": true, "healthcheck": true,
+	"shell": true, "volume": true, "maintainer": true,
+}
+
+var stageName = regexp.MustCompile(`^[a-z][a-z0-9_.-]*$`)
+
 // CheckContainerfile reports whether a Containerfile is one the image
-// command builds, wrapping ErrInvalid if not. It is deliberately strict,
-// refusing anything it can't read with certainty, since podman, not
-// bobbin, is the parser:
-//   - every FROM, and every COPY --from, names "scratch", an earlier stage,
-//     or an image pinned to content, so a build always starts from the
-//     same bytes; FROM takes no flags;
-//   - no ADD (it can fetch URLs and unpack archives: use COPY), no
-//     ONBUILD, no flags on RUN (such as --network or --mount), and COPY
-//     takes only --from, --chown, --chmod and --link;
-//   - no parser directives (# escape=, # syntax=) and no heredocs (<<),
-//     which change how lines are read.
+// command builds, wrapping ErrInvalid if not. It reads the file with the
+// parser podman's builder itself uses (openshift/imagebuilder, at the
+// version buildah 1.33, in podman 4.9, uses), so it sees the instructions
+// and flags podman will act on, then refuses:
+//   - a FROM or COPY --from that isn't "scratch", an earlier stage, or an
+//     image pinned to content, or that holds a variable ($), so a build
+//     always starts from the same bytes; stage names must be plain
+//     ([a-z][a-z0-9_.-]*);
+//   - flags on FROM or RUN (such as RUN --network or --mount), and COPY
+//     flags beyond --from, --chown, --chmod and --link;
+//   - any instruction but FROM, RUN, COPY, WORKDIR, ENV, LABEL, CMD,
+//     ENTRYPOINT, USER, EXPOSE, ARG, STOPSIGNAL, HEALTHCHECK, SHELL, VOLUME
+//     and MAINTAINER: so no ADD or ONBUILD;
+//   - heredocs, and an escape character other than the default.
 func CheckContainerfile(text string) error {
+	_, err := checkContainerfile(text)
+	return err
+}
+
+// checkContainerfile is CheckContainerfile, also returning the pinned
+// images the build starts from (in FROM and COPY --from), which must be
+// on the worker.
+func checkContainerfile(text string) (bases []string, err error) {
 	bad := func(format string, a ...any) error {
 		return fmt.Errorf("%w: Containerfile: "+format, append([]any{ErrInvalid}, a...)...)
 	}
 	if len(text) > MaxContainerfile || strings.ContainsRune(text, 0) {
-		return bad("must be at most %d bytes, without NUL", MaxContainerfile)
+		return nil, bad("must be at most %d bytes, without NUL", MaxContainerfile)
 	}
-	var lines []string
-	cur := ""
-	for _, l := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
-		if directive.MatchString(l) {
-			return bad("parser directives aren't allowed: %q", strings.TrimSpace(l))
-		}
-		t := strings.TrimSpace(l)
-		if cur == "" && (t == "" || strings.HasPrefix(t, "#")) {
-			continue
-		}
-		if strings.HasSuffix(t, `\`) {
-			cur += strings.TrimSuffix(t, `\`) + " "
-			continue
-		}
-		lines = append(lines, cur+t)
-		cur = ""
+	res, err := parser.Parse(strings.NewReader(text))
+	if err != nil {
+		return nil, bad("%v", err)
 	}
-	if cur != "" {
-		lines = append(lines, cur)
+	seen := map[string]bool{}
+	base := func(ref string) {
+		if pinned.MatchString(ref) && !seen[ref] {
+			seen[ref] = true
+			bases = append(bases, ref)
+		}
+	}
+	if res.EscapeToken != parser.DefaultEscapeToken {
+		return nil, bad("the escape directive isn't allowed")
 	}
 	stages := map[string]bool{}
-	from := func(ref string) bool {
-		return strings.EqualFold(ref, "scratch") || stages[strings.ToLower(ref)] || pinned.MatchString(ref)
+	pinnedOrStage := func(ref string) bool {
+		return !strings.Contains(ref, "$") && (strings.EqualFold(ref, "scratch") || stages[strings.ToLower(ref)] || pinned.MatchString(ref))
 	}
 	froms := 0
-	for _, l := range lines {
-		f := strings.Fields(l)
-		inst, args := strings.ToUpper(f[0]), f[1:]
-		if strings.Contains(l, "<<") && (inst == "RUN" || inst == "COPY") {
-			return bad("heredocs aren't allowed: %q", clipLine(l))
+	for _, n := range res.AST.Children {
+		var args []string
+		for a := n.Next; a != nil; a = a.Next {
+			args = append(args, a.Value)
 		}
-		switch inst {
-		case "FROM":
+		line := clipLine(strings.TrimSpace(n.Original))
+		if !containerfileInstructions[n.Value] {
+			return nil, bad("%s isn't allowed (line %d): %q", strings.ToUpper(n.Value), n.StartLine, line)
+		}
+		if len(n.Heredocs) > 0 {
+			return nil, bad("heredocs aren't allowed (line %d)", n.StartLine)
+		}
+		if froms == 0 && n.Value != "from" && n.Value != "arg" {
+			return nil, bad("must start with FROM (line %d)", n.StartLine)
+		}
+		switch n.Value {
+		case "from":
 			froms++
-			if len(args) == 0 || strings.HasPrefix(args[0], "-") || !from(args[0]) {
-				return bad("FROM must name scratch, an earlier stage or an image pinned to content (name@sha256:…), without flags: %q", clipLine(l))
+			if len(n.Flags) > 0 || len(args) == 0 || !pinnedOrStage(args[0]) {
+				return nil, bad("FROM must name scratch, an earlier stage or an image pinned to content (name@sha256:…), without flags or variables (line %d): %q", n.StartLine, line)
 			}
-			if len(args) == 3 && strings.EqualFold(args[1], "AS") {
+			base(args[0])
+			switch {
+			case len(args) == 3 && strings.EqualFold(args[1], "AS") && stageName.MatchString(strings.ToLower(args[2])):
 				stages[strings.ToLower(args[2])] = true
-			} else if len(args) != 1 {
-				return bad("FROM takes an image and an optional AS name: %q", clipLine(l))
+			case len(args) != 1:
+				return nil, bad("FROM takes an image and an optional AS name of letters, digits, _ . and - (line %d): %q", n.StartLine, line)
 			}
-		case "ADD", "ONBUILD":
-			return bad("%s isn't allowed (use COPY): %q", inst, clipLine(l))
-		case "RUN":
-			if len(args) > 0 && strings.HasPrefix(args[0], "--") {
-				return bad("RUN takes no flags: %q", clipLine(l))
+		case "run":
+			if len(n.Flags) > 0 {
+				return nil, bad("RUN takes no flags (line %d): %q", n.StartLine, line)
 			}
-		case "COPY":
-			for _, a := range args {
-				if !strings.HasPrefix(a, "--") {
-					break
-				}
+		case "copy":
+			for _, f := range n.Flags {
 				switch {
-				case strings.HasPrefix(a, "--from="):
-					if !from(strings.TrimPrefix(a, "--from=")) {
-						return bad("COPY --from must name an earlier stage or an image pinned to content: %q", clipLine(l))
+				case strings.HasPrefix(f, "--from="):
+					if !pinnedOrStage(strings.TrimPrefix(f, "--from=")) {
+						return nil, bad("COPY --from must name an earlier stage or an image pinned to content, without variables (line %d): %q", n.StartLine, line)
 					}
-				case strings.HasPrefix(a, "--chown="), strings.HasPrefix(a, "--chmod="), a == "--link":
+					base(strings.TrimPrefix(f, "--from="))
+				case strings.HasPrefix(f, "--chown="), strings.HasPrefix(f, "--chmod="), f == "--link":
 				default:
-					return bad("COPY takes only --from, --chown, --chmod and --link: %q", clipLine(l))
+					return nil, bad("COPY takes only --from, --chown, --chmod and --link (line %d): %q", n.StartLine, line)
 				}
 			}
-		}
-		if froms == 0 && inst != "ARG" {
-			return bad("must start with FROM")
+		case "healthcheck":
+		default:
+			if len(n.Flags) > 0 {
+				return nil, bad("%s takes no flags (line %d): %q", strings.ToUpper(n.Value), n.StartLine, line)
+			}
 		}
 	}
 	if froms == 0 {
-		return bad("has no FROM")
+		return nil, bad("has no FROM")
 	}
-	return nil
+	return bases, nil
 }
 
 func clipLine(l string) string {
@@ -167,6 +196,7 @@ func BuildArgv(dir, iidfile string) []string {
 		"--network=none",                   // RUN steps have no network at all
 		"--security-opt=no-new-privileges", // setuid binaries can't gain any
 		"--memory=" + BuildMemoryLimit,
+		"--ulimit", "cpu=" + BuildCPUSeconds, // each RUN process: CPU seconds, so a loop ends
 		"--http-proxy=false",     // don't copy the host's proxy variables in
 		"--timestamp=0",          // the same build gives the same image
 		"--identity-label=false", // nor the builder's version
@@ -208,8 +238,9 @@ type ImageResult struct {
 // program can run with the container command.
 //
 // Errors are classified for Temporal: a Containerfile or arguments the
-// command refuses fail with "InvalidInput", a push with no registry
-// configured with "ImageSetup", both non-retryable; a build or push that
+// command refuses fail with "InvalidInput", a base image the worker
+// doesn't have with "ContainerSetup", and a push with no registry
+// configured with "ImageSetup", all non-retryable; a build or push that
 // fails is retryable.
 func ImageCommand(r Runner, reg *ImageRegistry) weft.Arrow[plan.Input, string] {
 	return func(ctx context.Context, in plan.Input) (string, error) {
@@ -224,8 +255,11 @@ func ImageCommand(r Runner, reg *ImageRegistry) weft.Arrow[plan.Input, string] {
 			return "", temporal.NewNonRetryableApplicationError("the worker has no image registry to push to; give it one with -image-registry", "ImageSetup", nil)
 		}
 		id, err := r.Build(ctx, Build{Containerfile: in.Args[0], Inputs: in.Upstream})
-		if errors.Is(err, ErrInvalid) {
+		switch {
+		case errors.Is(err, ErrInvalid):
 			return "", invalid(err)
+		case errors.Is(err, ErrSetup):
+			return "", temporal.NewNonRetryableApplicationError(err.Error(), "ContainerSetup", nil)
 		}
 		if err != nil {
 			return "", err
