@@ -28,6 +28,7 @@ bobbin reimplements nothing. It drives the `podman` command line, the way warp d
 | [shuttle](https://github.com/heedle-ai/shuttle/wiki) | Durable execution on Temporal |
 | **bobbin** | A fresh container per agent step (this repo) |
 | [reed](https://github.com/heedle-ai/reed/wiki) | A fresh browser per browsing step, reaching only the hosts its program names |
+| [pirn](https://github.com/heedle-ai/pirn/wiki) | Claude for agent steps: answers from the step's inputs, recorded with them |
 | [warp](https://github.com/heedle-ai/warp/wiki) | Content-addressed store |
 | [drawdown](https://github.com/heedle-ai/drawdown/wiki) | Web UI |
 | [loom](https://github.com/heedle-ai/loom/wiki) | Runs everything together |
