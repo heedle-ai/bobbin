@@ -108,7 +108,9 @@ func TestInv_NoMounts(t *testing.T) {
 	for i := 0; i < st.NumField(); i++ {
 		fields = append(fields, st.Field(i).Name)
 	}
-	if got := strings.Join(fields, " "); got != "Image Args Env Stdin" {
+	// Secrets (BOB-27) are values the caller gives, like Env: nothing from
+	// the host.
+	if got := strings.Join(fields, " "); got != "Image Args Env Secrets Stdin" {
 		t.Errorf("Spec fields = %s; adding a field needs a new invariant", got)
 	}
 }
@@ -319,5 +321,79 @@ case "$1" in exec) head -c 100000 /dev/zero | tr '\\0' x >&2; echo >&2; echo "Er
 	defer bs.Close()
 	if _, err := bs.Exec(ctx, "x", nil); !errors.Is(err, bobbin.ErrSetup) {
 		t.Errorf("podman's error after long stderr: %v", err)
+	}
+}
+
+// TestInv_SecretsStayOffTheCommandLine: a secret's value reaches the
+// container only through podman's own environment, never its command
+// line, where any process on the host could read it; it's named there as
+// --env NAME. A secret can't also be in Env, or be empty (which would let
+// podman copy the host's variable of that name in).
+func TestInv_SecretsStayOffTheCommandLine(t *testing.T) {
+	podman := fakePodman(t, `printf 'ARGV %s\n' "$*"; printf 'ENV %s\n' "$LINEAR_TOKEN"`)
+	s := bobbin.Spec{Image: zeros, Env: map[string]string{"A": "1"}, Secrets: map[string]string{"LINEAR_TOKEN": "lin_secret_123"}}
+	out, err := bobbin.Runner{Podman: podman}.Run(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv, env, _ := strings.Cut(string(out), "\nENV ")
+	if strings.Contains(argv, "lin_secret_123") || !strings.Contains(argv, "--env A=1 --env LINEAR_TOKEN "+zeros) || strings.TrimSpace(env) != "lin_secret_123" {
+		t.Errorf("run: %q", out)
+	}
+	if got := strings.Join(s.SessionArgv("n", time.Minute), " "); strings.Contains(got, "lin_secret_123") || !strings.Contains(got, "--env LINEAR_TOKEN") {
+		t.Errorf("session argv %q", got)
+	}
+	seen := filepath.Join(t.TempDir(), "seen")
+	session := fakePodman(t, `case "$1" in run) printf '%s|%s' "$*" "$LINEAR_TOKEN" > `+seen+`;; esac`)
+	ss, err := bobbin.Runner{Podman: session}.Start(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss.Close()
+	if b, _ := os.ReadFile(seen); !strings.HasSuffix(string(b), "|lin_secret_123") || strings.Count(string(b), "lin_secret_123") != 1 {
+		t.Errorf("session start saw %q", b)
+	}
+	for _, bad := range []bobbin.Spec{
+		{Image: zeros, Secrets: map[string]string{"X": ""}},
+		{Image: zeros, Env: map[string]string{"X": "1"}, Secrets: map[string]string{"X": "2"}},
+		{Image: zeros, Secrets: map[string]string{"1X": "v"}},
+		{Image: zeros, Secrets: map[string]string{"X": "a\x00b"}},
+		// Review 19: names podman itself reads would steer it.
+		{Image: zeros, Secrets: map[string]string{"CONTAINER_HOST": "unix:///tmp/evil.sock"}},
+		{Image: zeros, Secrets: map[string]string{"containers_conf": "/tmp/x"}},
+		{Image: zeros, Secrets: map[string]string{"PATH": "/tmp"}},
+		{Image: zeros, Secrets: map[string]string{"LD_PRELOAD": "/tmp/x.so"}},
+		{Image: zeros, Secrets: map[string]string{"https_proxy": "http://evil"}},
+	} {
+		if err := bad.Validate(); !errors.Is(err, bobbin.ErrInvalid) {
+			t.Errorf("accepted %+v", bad.Secrets)
+		}
+	}
+}
+
+// TestInv_SessionCommandsStream: Session.Command is a command in the
+// session (podman exec --interactive, in Workdir) whose standard input and
+// output the caller streams, for a server that runs as long as the step.
+func TestInv_SessionCommandsStream(t *testing.T) {
+	podman := fakePodman(t, `case "$1" in exec) case "$*" in *"mkdir -p"*) exit 0;; esac; printf '%s\n' "$*"; while read -r l; do echo "got $l"; done;; esac`)
+	ss, err := bobbin.Runner{Podman: podman}.Start(ctx, bobbin.Spec{Image: zeros})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	cmd := ss.Command(ctx, "server", "--stdio")
+	in, _ := cmd.StdinPipe()
+	var out strings.Builder
+	cmd.Stdout = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	in.Write([]byte("ping\n"))
+	in.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if want := "exec --interactive --workdir /work " + ss.Name() + " /bin/sh -c server sh --stdio\ngot ping\n"; out.String() != want {
+		t.Errorf("got %q, want %q", out.String(), want)
 	}
 }

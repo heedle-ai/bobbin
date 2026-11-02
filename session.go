@@ -69,14 +69,7 @@ func (s Spec) SessionArgv(name string, life time.Duration) []string {
 		"--timeout=" + strconv.Itoa(int(math.Ceil(life.Seconds()))),
 		"--entrypoint", "/bin/sh",
 	}
-	keys := make([]string, 0, len(s.Env))
-	for k := range s.Env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		argv = append(argv, "--env", k+"="+s.Env[k])
-	}
+	argv = append(argv, s.envArgs()...)
 	return append(argv, s.Image, "-c", keepAlive)
 }
 
@@ -103,7 +96,7 @@ func (r Runner) Start(ctx context.Context, s Spec) (*Session, error) {
 	ss := &Session{podman: r.podman(), name: "bobbin-session-" + hex.EncodeToString(id)}
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, ss.podman, s.SessionArgv(ss.name, life)...)
-	cmd.Env = cleanEnv(os.Environ())
+	cmd.Env = s.secretEnv()
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		ss.Close() // in case podman created it before failing
@@ -179,6 +172,19 @@ func (s *Session) Exec(ctx context.Context, command string, stdin []byte, args .
 		return res, fmt.Errorf("%w: podman exec exited %d: %s", ErrSetup, res.ExitCode, strings.TrimSpace(res.Stderr))
 	}
 	return res, nil
+}
+
+// Command is a long-running command in the session, for its caller to
+// start, stream (Stdin, Stdout) and wait for, such as a server speaking
+// over standard input and output. Its standard error is discarded unless
+// the caller sets it. Cancelling ctx stops podman exec; what the command
+// left running ends with the session.
+func (s *Session) Command(ctx context.Context, command string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, s.podman, s.ExecArgv(command, args...)...)
+	cmd.Env = cleanEnv(os.Environ())
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 5 * time.Second
+	return cmd
 }
 
 // Stop kills every process the session's commands left running (a

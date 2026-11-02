@@ -26,6 +26,7 @@ Every flag comes before the image. Podman stops reading its own flags at the ima
 | `--http-proxy=false` | Podman doesn't copy the host's proxy variables in | By default it does, so a proxy URL with credentials would reach every agent (found in review 4) |
 | `--timeout=N` | Podman stops the container after N seconds | Set from the context deadline, such as the activity's start-to-close timeout |
 | `--env KEY=VALUE` | Sets a variable inside the container | Only the variables in `Spec.Env`; nothing is inherited from the host |
+| `--env NAME` | Sets a secret inside the container, its value taken from podman's own environment | Only the names in `Spec.Secrets`, whose values bobbin puts in podman's environment, so they never appear on a command line any process on the host can read |
 
 There are no `--volume`, `--mount`, `--tmpfs`, `--device`, `--publish` or host-namespace flags, and `Spec` has no field that could carry one: a container sees only its image, arguments, environment and stdin. `TestInv_NoMounts` fails if any other flag-like string appears in the package, or a field is added to `Spec`.
 
@@ -46,6 +47,7 @@ An agent step runs many commands, each building on the last: write a file, run a
 | `Start(spec)` | `podman run --detach --rm …`, then `podman exec … /bin/mkdir -p /work` | Starts the container with `/bin/sh` waiting, and creates `/work` |
 | `Exec(command, stdin)` | `podman exec --interactive --workdir /work … /bin/sh -c command` | Runs one command in `/work`; its exit code, and up to 64 KiB each of standard output and error, are the result |
 | `Write(path, data)` / `Read(path, max)` | `podman exec … cat` | Puts a file in, or reads one out; the path is an argument, never part of a command |
+| `Command(command)` | `podman exec --interactive --workdir /work … /bin/sh -c command` | A long-running command whose standard input and output the caller streams, such as an MCP server speaking over them; it ends when its context does, or with the session |
 | `ReadTo(path, w, max)` | `podman exec … cat` | Streams a file of any size out to a writer, up to `max` bytes, so a large file never has to fit in memory |
 | `Diff()` | `podman diff --format json` | Lists every path the session added, changed or deleted, relative to the image |
 | `Stop()` | `podman exec … kill -9 -1` | Kills commands left running, keeping the files |

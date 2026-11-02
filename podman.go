@@ -70,6 +70,12 @@ type Spec struct {
 	// Env sets environment variables inside the container. Nothing is
 	// inherited from the host.
 	Env map[string]string
+	// Secrets also set environment variables inside the container, but
+	// their values never appear on podman's command line (where any
+	// process on the host could read them): the command line names them
+	// (--env NAME), and podman takes each value from its own environment,
+	// which bobbin sets. Nothing else is inherited from the host.
+	Secrets map[string]string
 	// Stdin is the container's standard input.
 	Stdin []byte
 }
@@ -100,7 +106,64 @@ func (s Spec) Validate() error {
 			return fmt.Errorf("%w: environment variable %q=%q", ErrInvalid, k, v)
 		}
 	}
+	for k, v := range s.Secrets {
+		if _, both := s.Env[k]; both || !envKey.MatchString(k) || strings.ContainsRune(v, 0) || !utf8.ValidString(v) || v == "" {
+			return fmt.Errorf("%w: secret %q must be a valid, non-empty variable that isn't also in Env", ErrInvalid, k)
+		}
+		if podmanReads(k) {
+			return fmt.Errorf("%w: secret %q has a name podman itself reads, so it would change how podman runs", ErrInvalid, k)
+		}
+	}
 	return nil
+}
+
+// podmanReads reports whether podman, or what it runs, reads the
+// variable name: a secret, which goes in podman's own environment, must
+// never steer it (review 19: CONTAINER_HOST redirected podman).
+func podmanReads(k string) bool {
+	u := strings.ToUpper(k)
+	for _, p := range []string{"CONTAINER", "_CONTAINER", "PODMAN", "BUILDAH", "DOCKER", "REGISTRY", "STORAGE", "XDG_", "LC_", "LANG", "SSL_", "GODEBUG", "GOMAXPROCS", "GOTRACEBACK", "LD_", "DBUS_"} {
+		if strings.HasPrefix(u, p) {
+			return true
+		}
+	}
+	switch u {
+	case "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TZ", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "NOTIFY_SOCKET", "TERM":
+		return true
+	}
+	return false
+}
+
+// envArgs are the --env flags for s: Env by value, then Secrets by name
+// only, each sorted.
+func (s Spec) envArgs() []string {
+	var argv []string
+	for _, k := range sortedKeys(s.Env) {
+		argv = append(argv, "--env", k+"="+s.Env[k])
+	}
+	for _, k := range sortedKeys(s.Secrets) {
+		argv = append(argv, "--env", k)
+	}
+	return argv
+}
+
+// secretEnv is podman's environment for s: the host's, cleaned, with the
+// secrets' values, which the --env NAME flags read.
+func (s Spec) secretEnv() []string {
+	env := cleanEnv(os.Environ())
+	for _, k := range sortedKeys(s.Secrets) {
+		env = append(env, k+"="+s.Secrets[k])
+	}
+	return env
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // Argv is the exact podman command line Run uses for s, without the
@@ -121,14 +184,7 @@ func (s Spec) Argv(timeout time.Duration) []string {
 	if timeout > 0 {
 		argv = append(argv, "--timeout="+strconv.Itoa(int(math.Ceil(timeout.Seconds()))))
 	}
-	keys := make([]string, 0, len(s.Env))
-	for k := range s.Env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		argv = append(argv, "--env", k+"="+s.Env[k])
-	}
+	argv = append(argv, s.envArgs()...)
 	argv = append(argv, s.Image)
 	return append(argv, s.Args...)
 }
@@ -150,7 +206,7 @@ func (r Runner) Run(ctx context.Context, s Spec) ([]byte, error) {
 	}
 	podman := r.podman()
 	cmd := exec.CommandContext(ctx, podman, s.Argv(timeout)...)
-	cmd.Env = cleanEnv(os.Environ())
+	cmd.Env = s.secretEnv()
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = 10 * time.Second
 	cmd.Stdin = bytes.NewReader(s.Stdin)
