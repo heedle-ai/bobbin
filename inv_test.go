@@ -79,7 +79,7 @@ func TestInv_NoMounts(t *testing.T) {
 		// image ID and digest files, the Containerfile, the push format,
 		// and TLS off only for a plain-HTTP registry the worker names.
 		"--timestamp=0": true, "--identity-label=false": true, "--iidfile": true, "--file": true,
-		"--digestfile": true, "--tls-verify=false": true}
+		"--digestfile": true, "--tls-verify=false": true, "--ulimit": true}
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 	if err != nil {
@@ -88,9 +88,9 @@ func TestInv_NoMounts(t *testing.T) {
 	for _, pkg := range pkgs {
 		for _, f := range pkg.Files {
 			ast.Inspect(f, func(n ast.Node) bool {
-				// CheckContainerfile reads Containerfile syntax (COPY
+				// checkContainerfile reads Containerfile syntax (COPY
 				// --from=…); it never builds a podman command line.
-				if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.Name == "CheckContainerfile" {
+				if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.Name == "checkContainerfile" {
 					return false
 				}
 				if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
@@ -124,7 +124,10 @@ func TestInv_OnlyPodmanRunsProcesses(t *testing.T) {
 		return !strings.Contains(strings.SplitN(p, "/", 2)[0], ".") || // standard library
 			strings.HasPrefix(p, "go.temporal.io/sdk/") ||
 			p == "github.com/heedle-ai/weft" || p == "github.com/heedle-ai/shuttle" ||
-			p == "github.com/heedle-ai/shuttle/plan" || p == "github.com/heedle-ai/draft/registry"
+			p == "github.com/heedle-ai/shuttle/plan" || p == "github.com/heedle-ai/draft/registry" ||
+			// The Containerfile parser podman's builder uses, so CheckContainerfile
+			// reads a Containerfile exactly as the build will.
+			p == "github.com/openshift/imagebuilder/dockerfile/parser"
 	}
 	for _, p := range strings.Fields(string(out)) {
 		if !ok(p) {

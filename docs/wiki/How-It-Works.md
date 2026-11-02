@@ -71,20 +71,35 @@ Its build context is a fresh temporary directory holding only the Containerfile 
 | `--network=none` | `RUN` steps have no network |
 | `--security-opt=no-new-privileges` | setuid binaries gain nothing |
 | `--memory=2g` | Bounded memory (more than a step's container: compilers run here) |
+| `--ulimit cpu=1800` | Each `RUN` process gets 30 minutes of CPU time, so a busy loop ends |
 | `--http-proxy=false` | The worker's proxy variables stay out |
-| `--timestamp=0`, `--identity-label=false` | The same build gives the same image ID |
+| `--timestamp=0`, `--identity-label=false` | Timestamps and the builder's version don't change the image ID |
 
 `RUN` steps keep Podman's default, reduced capabilities rather than none: package managers need to own and chmod files, and dropping them all would break ordinary builds.
 
-Before building, `CheckContainerfile` refuses anything it can't read with certainty, since Podman, not bobbin, is the parser: a `FROM` or `COPY --from` that isn't `scratch`, an earlier stage or an image pinned to content (`name@sha256:…` or a full image ID); flags on `FROM` or `RUN` (such as `RUN --network` or `--mount`); `ADD` (it fetches URLs and unpacks archives: use `COPY`); `ONBUILD`; parser directives (`# escape=`, `# syntax=`); and heredocs.
+Before building, `CheckContainerfile` reads the Containerfile with the parser Podman's builder itself uses ([openshift/imagebuilder](https://github.com/openshift/imagebuilder), at the version buildah 1.33 in Podman 4.9 uses), so it sees the instructions and flags the build will act on, however the file is laid out (comments and blank lines inside a continued line included). It refuses:
+
+- a `FROM` or `COPY --from` that isn't `scratch`, an earlier stage, or an image pinned to content (`name@sha256:…` or a full image ID), or that holds a variable (`$`); stage names must be plain (`[a-z][a-z0-9_.-]*`);
+- flags on `FROM` or `RUN` (such as `RUN --network` or `--mount`), and `COPY` flags beyond `--from`, `--chown`, `--chmod` and `--link`;
+- any instruction but `FROM`, `RUN`, `COPY`, `WORKDIR`, `ENV`, `LABEL`, `CMD`, `ENTRYPOINT`, `USER`, `EXPOSE`, `ARG`, `STOPSIGNAL`, `HEALTHCHECK`, `SHELL`, `VOLUME` and `MAINTAINER`: so no `ADD` (it fetches URLs and unpacks archives: use `COPY`) and no `ONBUILD`;
+- heredocs, and an escape character other than `\`.
+
+Then `podman image exists` checks that every pinned base is on the worker, since builds never pull.
 
 The output is JSON, `{"image": "sha256:<hex>"}`: an image ID that a later program can run with `(container "<that ID>" …)`. Built images stay in the worker's Podman storage; `podman image prune` removes unused ones.
+
+What a build doesn't bound, plainly:
+
+- **A cancelled build keeps running.** Podman runs each `RUN` step in its own session, so stopping `podman build` (a step's timeout, a cancelled run) leaves the step running until it ends; the CPU limit ends a busy loop, but not one that waits. Every retry starts a new build.
+- **Processes and disk.** `RUN` steps have no process limit, and what they write goes to the worker's Podman storage.
+- **A base image's `ONBUILD` triggers** run, inside the same sandbox, like the Containerfile's own `RUN` steps. Bases are only images already on the worker.
+- **Same image ID.** A build whose `RUN` steps are deterministic gives the same ID anywhere; one that isn't (reading `/dev/urandom`, say) gives the same ID again only on the same worker, from Podman's layer cache.
 
 ### Publishing
 
 `(image "<Containerfile>" "push")` also pushes the image, and only then: to the worker's `-image-registry` repository (such as `ghcr.io/acme/heedle-images`), tagged `sha256-<hex>`, with the worker's own `podman login`. The program never sees the credentials, and without a registry the step fails at once with `ImageSetup`. The output gains `"pushed": "<repo>@sha256:<manifest digest>"`.
 
-A build or push that fails is retryable; a Containerfile the check refuses fails with `InvalidInput`, and a base image the worker doesn't have with `ContainerSetup`. The step's plan node carries a 30-minute timeout (`ImageOptions`).
+A build or push that fails is retryable (a push the registry refuses for lack of a login too, so give the worker its `podman login` first); a Containerfile the check refuses fails with `InvalidInput`, and a base image the worker doesn't have with `ContainerSetup`. The step's plan node carries a 30-minute timeout (`ImageOptions`).
 
 ## Retries get a fresh container
 

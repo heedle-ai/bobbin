@@ -32,6 +32,10 @@ func TestInv_ContainerfilesAreChecked(t *testing.T) {
 		"FROM " + pin + "\nRUN echo hi > /a\nCOPY in/n0.txt /n0.txt\nCMD [\"cat\", \"/a\"]\n",
 		"ARG X=1\nFROM " + zeros + " AS build\nRUN make \\\n  all\nFROM scratch\nCOPY --from=build --chown=1:1 /out /out\n",
 		"# a comment\n\nFROM sha256:" + zeros + "\nCOPY --from=" + pin + " /bin/sh /sh\n",
+		// Review 11: arithmetic isn't a heredoc; buildah ignores # syntax.
+		"FROM " + pin + "\nRUN echo $((1<<2))\n",
+		"# syntax=docker/dockerfile:1\nFROM " + pin + "\n",
+		"FROM " + pin + "\nHEALTHCHECK --interval=5s CMD true\n",
 	} {
 		if err := bobbin.CheckContainerfile(ok); err != nil {
 			t.Errorf("refused %q: %v", ok, err)
@@ -43,10 +47,21 @@ func TestInv_ContainerfilesAreChecked(t *testing.T) {
 		"FROM " + pin + "\nADD https://example.com/x /x\n", "FROM " + pin + "\nADD in/n0.txt /x\n",
 		"FROM " + pin + "\nONBUILD RUN curl evil\n", "FROM " + pin + "\nRUN --network=host curl x\n",
 		"FROM " + pin + "\nRUN --mount=type=bind,source=/,target=/h ls\n", "FROM " + pin + "\nCOPY --from=busybox /bin /bin\n",
-		"FROM " + pin + "\nCOPY --parents in /x\n", "# syntax=docker/dockerfile:1\nFROM " + pin + "\n",
+		"FROM " + pin + "\nCOPY --parents in /x\n",
 		"# escape=`\nFROM " + pin + "\n", "FROM " + pin + "\nRUN <<EOF\ncurl x\nEOF\n",
 		"FROM " + pin + "\nRUN echo \\\n --network\nFROM busybox\n", "FROM " + pin + "\x00\n",
 		"FROM " + pin + "\nCOPY --from=ghost /x /x\n", strings.Repeat("#", bobbin.MaxContainerfile) + "\nFROM " + pin,
+		// Review 11: comment and blank lines inside a continuation hid flags
+		// from the old check; podman reads them as RUN's and COPY's own.
+		"FROM " + pin + "\nRUN \\\n\n--network=host ls /sys/class/net > /nets\n",
+		"FROM " + pin + "\nRUN \\\n# c\n--mount=type=bind,from=localhost/rv11bb,target=/m ls /m\n",
+		"FROM " + pin + "\nRUN \\\n# c\n--mount=type=cache,target=/c ls /c\n",
+		"FROM " + pin + "\nCOPY \\\n#\n--from=localhost/rv11bb /bin/busybox /bb\n",
+		"FROM " + pin + "\nrun\t--network=host ls\n",
+		// Review 11: a variable stage name let COPY --from=$N read any image.
+		"FROM " + pin + " AS $N\nARG N=localhost/rv11bb\nFROM " + pin + "\nARG N=localhost/rv11bb\nCOPY --from=$N /bin/busybox /x\n",
+		"FROM " + pin + " AS Build!\n", "FROM " + pin + "\nCOPY --from=${N} /a /b\n",
+		"FROM " + pin + "\nCOPY <<EOF /x\nhi\nEOF\n", "FROM " + pin + "\nWORKDIR --x /w\n", "FROM " + pin + "\nFOO bar\n",
 	} {
 		if err := bobbin.CheckContainerfile(bad); !errors.Is(err, bobbin.ErrInvalid) {
 			t.Errorf("accepted %q", bad)
@@ -59,7 +74,7 @@ func TestInv_ContainerfilesAreChecked(t *testing.T) {
 // Containerfile and in/<node>.txt for each input.
 func TestInv_ExactBuildCommandLines(t *testing.T) {
 	want := []string{"build", "--pull=never", "--network=none", "--security-opt=no-new-privileges",
-		"--memory=2g", "--http-proxy=false", "--timestamp=0", "--identity-label=false", "--iidfile", "/t/iid",
+		"--memory=2g", "--ulimit", "cpu=1800", "--http-proxy=false", "--timestamp=0", "--identity-label=false", "--iidfile", "/t/iid",
 		"--file", "/t/context/Containerfile", "/t/context"}
 	if got := bobbin.BuildArgv("/t/context", "/t/iid"); !reflect.DeepEqual(got, want) {
 		t.Errorf("build argv %q", got)
@@ -75,6 +90,7 @@ func TestInv_ExactBuildCommandLines(t *testing.T) {
 	podman := filepath.Join(dir, "podman")
 	// The fake lists the build context, then writes the image ID.
 	os.WriteFile(podman, []byte(`#!/bin/sh
+[ "$1" = image ] && { echo "$*" >> `+log+`; exit 0; }
 printf '%s\n' "$*" >> `+log+`
 ctx=""; iid=""; prev=""
 for a in "$@"; do [ "$prev" = --iidfile ] && iid=$a; prev=$a; ctx=$a; done
@@ -87,8 +103,10 @@ echo `+id+` > "$iid"
 		t.Fatalf("build = %q, %v", got, err)
 	}
 	b, _ := os.ReadFile(log)
-	if lines := strings.Split(strings.TrimSpace(string(b)), "\n"); strings.Join(lines[1:], " ") != ". ./Containerfile ./in ./in/n0.txt ./in/n1.txt" {
-		t.Errorf("context: %q", lines[1:])
+	// Every base is checked first; then the build, whose context is only
+	// the Containerfile and the inputs.
+	if lines := strings.Split(strings.TrimSpace(string(b)), "\n"); lines[0] != "image exists "+pin || strings.Join(lines[2:], " ") != ". ./Containerfile ./in ./in/n0.txt ./in/n1.txt" {
+		t.Errorf("podman ran: %q", lines)
 	}
 	for _, bad := range []map[string]string{{"../x": "a"}, {"n0/x": "a"}, {"": "a"}} {
 		if _, err := (bobbin.Runner{Podman: podman}).Build(context.Background(), bobbin.Build{Containerfile: "FROM " + pin, Inputs: bad}); !errors.Is(err, bobbin.ErrInvalid) {
@@ -99,12 +117,13 @@ echo `+id+` > "$iid"
 
 // TestInv_ImageCommand: the image command takes a Containerfile and an
 // optional "push"; a push with no registry fails with ImageSetup before
-// building; a refused Containerfile fails with InvalidInput; the output
-// is the image ID as JSON.
+// building; a refused Containerfile fails with InvalidInput, and a base
+// the worker doesn't have with ContainerSetup; the output is the image ID
+// as JSON.
 func TestInv_ImageCommand(t *testing.T) {
 	dir := t.TempDir()
 	podman := filepath.Join(dir, "podman")
-	os.WriteFile(podman, []byte("#!/bin/sh\necho build >> "+filepath.Join(dir, "log")+"\nfor a in \"$@\"; do [ \"$p\" = --iidfile ] && echo sha256:"+zeros+" > \"$a\"; p=$a; done\n"), 0o755)
+	os.WriteFile(podman, []byte("#!/bin/sh\ncase \"$*\" in \"image exists \"*abab*) exit 1;; \"image exists \"*) exit 0;; esac\necho build >> "+filepath.Join(dir, "log")+"\nfor a in \"$@\"; do [ \"$p\" = --iidfile ] && echo sha256:"+zeros+" > \"$a\"; p=$a; done\n"), 0o755)
 	cmd := bobbin.ImageCommand(bobbin.Runner{Podman: podman}, nil)
 	kind := func(err error) string {
 		var app *temporal.ApplicationError
@@ -129,6 +148,10 @@ func TestInv_ImageCommand(t *testing.T) {
 	out, err := cmd(context.Background(), plan.Input{Args: []string{"FROM " + pin}})
 	if err != nil || out != `{"image":"sha256:`+zeros+`"}` {
 		t.Errorf("out %s, %v", out, err)
+	}
+	// Review 11: a missing base was a retryable error, not ContainerSetup.
+	if _, err := cmd(context.Background(), plan.Input{Args: []string{"FROM " + strings.Repeat("ab", 32)}}); kind(err) != "ContainerSetup" {
+		t.Errorf("missing base: %v", err)
 	}
 }
 

@@ -244,11 +244,28 @@ func (t *tail) Write(p []byte) (int, error) {
 // context is a fresh temporary directory holding only the Containerfile
 // and in/<node>.txt for each input, removed afterwards; podman runs as
 // BuildArgv says. A Containerfile CheckContainerfile refuses wraps
-// ErrInvalid; a base image not on the worker wraps ErrSetup; a build that
-// fails is an *ExitError.
+// ErrInvalid; a base image not on the worker (podman image exists, asked
+// before building) wraps ErrSetup; a build that fails is an *ExitError.
 func (r Runner) Build(ctx context.Context, b Build) (string, error) {
-	if err := CheckContainerfile(b.Containerfile); err != nil {
+	bases, err := checkContainerfile(b.Containerfile)
+	if err != nil {
 		return "", err
+	}
+	// Builds never pull, so every base must already be here; asking podman
+	// first gives an exact answer, rather than reading it from a build log.
+	for _, ref := range bases {
+		cmd := exec.CommandContext(ctx, r.podman(), "image", "exists", ref)
+		cmd.Env = cleanEnv(os.Environ())
+		if err := cmd.Run(); err != nil {
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == 1 {
+				return "", fmt.Errorf("%w: the base image %s isn't on the worker (builds never pull)", ErrSetup, ref)
+			}
+			return "", fmt.Errorf("%w: podman image exists %s: %v", ErrSetup, ref, err)
+		}
 	}
 	ids, err := sortedInputs(b.Inputs)
 	if err != nil {
@@ -284,11 +301,8 @@ func (r Runner) Build(ctx context.Context, b Build) (string, error) {
 		}
 		log := strings.TrimSpace(string(stderr.buf))
 		var exit *exec.ExitError
-		switch {
-		case !errors.As(err, &exit):
+		if !errors.As(err, &exit) {
 			return "", fmt.Errorf("%w: %v", ErrSetup, err)
-		case strings.Contains(log, "image not known"):
-			return "", fmt.Errorf("%w: a base image isn't on the worker (builds never pull): %s", ErrSetup, log)
 		}
 		return "", &ExitError{Code: exit.ExitCode(), Stderr: log}
 	}
