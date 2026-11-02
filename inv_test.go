@@ -74,7 +74,12 @@ func TestInv_NoMounts(t *testing.T) {
 		// diff, rm and ps flags. None mounts, publishes or shares anything.
 		"--detach": true, "--name": true, "--label": true, "--entrypoint": true, "-c": true,
 		"--interactive": true, "--workdir": true, "--format": true, "--force": true, "--time": true,
-		"--ignore": true}
+		"--ignore": true,
+		// Builds and pushes (build.go): fixed timestamps and labels, the
+		// image ID and digest files, the Containerfile, the push format,
+		// and TLS off only for a plain-HTTP registry the worker names.
+		"--timestamp=0": true, "--identity-label=false": true, "--iidfile": true, "--file": true,
+		"--digestfile": true, "--tls-verify=false": true}
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool { return !strings.HasSuffix(fi.Name(), "_test.go") }, 0)
 	if err != nil {
@@ -83,6 +88,11 @@ func TestInv_NoMounts(t *testing.T) {
 	for _, pkg := range pkgs {
 		for _, f := range pkg.Files {
 			ast.Inspect(f, func(n ast.Node) bool {
+				// CheckContainerfile reads Containerfile syntax (COPY
+				// --from=…); it never builds a podman command line.
+				if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.Name == "CheckContainerfile" {
+					return false
+				}
 				if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
 					s, _ := strconv.Unquote(lit.Value)
 					if strings.HasPrefix(s, "-") && !allowed[s] {

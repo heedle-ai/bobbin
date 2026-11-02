@@ -239,3 +239,92 @@ func (t *tail) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// Build builds b's image and returns its ID (sha256:<hex>). The build
+// context is a fresh temporary directory holding only the Containerfile
+// and in/<node>.txt for each input, removed afterwards; podman runs as
+// BuildArgv says. A Containerfile CheckContainerfile refuses wraps
+// ErrInvalid; a base image not on the worker wraps ErrSetup; a build that
+// fails is an *ExitError.
+func (r Runner) Build(ctx context.Context, b Build) (string, error) {
+	if err := CheckContainerfile(b.Containerfile); err != nil {
+		return "", err
+	}
+	ids, err := sortedInputs(b.Inputs)
+	if err != nil {
+		return "", err
+	}
+	dir, err := os.MkdirTemp("", "bobbin-build-")
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrSetup, err)
+	}
+	defer os.RemoveAll(dir)
+	ctxDir := dir + "/context"
+	if err := os.MkdirAll(ctxDir+"/in", 0o755); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrSetup, err)
+	}
+	if err := os.WriteFile(ctxDir+"/Containerfile", []byte(b.Containerfile), 0o644); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrSetup, err)
+	}
+	for _, id := range ids {
+		if err := os.WriteFile(ctxDir+"/in/"+id+".txt", []byte(b.Inputs[id]), 0o644); err != nil {
+			return "", fmt.Errorf("%w: %v", ErrSetup, err)
+		}
+	}
+	iid := dir + "/iid"
+	cmd := exec.CommandContext(ctx, r.podman(), BuildArgv(ctxDir, iid)...)
+	cmd.Env = cleanEnv(os.Environ())
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 10 * time.Second
+	stderr := &tail{max: StderrTail}
+	cmd.Stdout, cmd.Stderr = stderr, stderr // the build log: its end says what failed
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		log := strings.TrimSpace(string(stderr.buf))
+		var exit *exec.ExitError
+		switch {
+		case !errors.As(err, &exit):
+			return "", fmt.Errorf("%w: %v", ErrSetup, err)
+		case strings.Contains(log, "image not known"):
+			return "", fmt.Errorf("%w: a base image isn't on the worker (builds never pull): %s", ErrSetup, log)
+		}
+		return "", &ExitError{Code: exit.ExitCode(), Stderr: log}
+	}
+	id, err := os.ReadFile(iid)
+	if err != nil || !imageID.Match(bytes.TrimSpace(id)) {
+		return "", fmt.Errorf("bobbin: podman build wrote no image ID: %q", id)
+	}
+	return string(bytes.TrimSpace(id)), nil
+}
+
+// Push pushes image id to reg, as PushArgv says, with the worker's own
+// podman login, and returns where it is: repo@sha256:<manifest digest>.
+func (r Runner) Push(ctx context.Context, id string, reg ImageRegistry) (string, error) {
+	if !imageID.MatchString(id) || !imageRepo.MatchString(reg.Repo) {
+		return "", fmt.Errorf("%w: pushing %q to %q", ErrInvalid, id, reg.Repo)
+	}
+	dir, err := os.MkdirTemp("", "bobbin-push-")
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrSetup, err)
+	}
+	defer os.RemoveAll(dir)
+	cmd := exec.CommandContext(ctx, r.podman(), PushArgv(id, reg.Repo, dir+"/digest", reg.PlainHTTP)...)
+	cmd.Env = cleanEnv(os.Environ())
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = 10 * time.Second
+	stderr := &tail{max: StderrTail}
+	cmd.Stdout, cmd.Stderr = stderr, stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("bobbin: podman push: %v: %s", err, strings.TrimSpace(string(stderr.buf)))
+	}
+	d, err := os.ReadFile(dir + "/digest")
+	if err != nil || !imageID.Match(bytes.TrimSpace(d)) {
+		return "", fmt.Errorf("bobbin: podman push wrote no digest: %q", d)
+	}
+	return reg.Repo + "@" + string(bytes.TrimSpace(d)), nil
+}
