@@ -23,8 +23,6 @@ Install Go 1.24+ from [go.dev/dl](https://go.dev/dl/) or your package manager (`
 bobbin builds against sibling checkouts of the other heedle-ai repos:
 
 ```bash
-gh auth login        # once; bobbin is private
-gh auth setup-git    # lets git clone them with your gh login
 mkdir -p ~/src/heedle-ai && cd ~/src/heedle-ai
 for r in weft draft shuttle bobbin; do git clone https://github.com/heedle-ai/$r.git; done
 cd bobbin
