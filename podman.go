@@ -214,10 +214,11 @@ func (s Spec) NamedArgv(name string, timeout time.Duration) []string {
 // also stops the container at that deadline (--timeout); if ctx is
 // cancelled, podman is sent SIGTERM, which it passes to the container.
 func (r Runner) Run(ctx context.Context, s Spec) ([]byte, error) {
+	// The labels ctx carries are checked like the Spec's own (BOB-501).
+	s.Labels = s.Labels.orFrom(ctx)
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
-	s.Labels = s.Labels.orFrom(ctx)
 	var timeout time.Duration
 	if d, ok := ctx.Deadline(); ok {
 		if timeout = time.Until(d); timeout <= 0 {

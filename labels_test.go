@@ -123,6 +123,16 @@ func TestInv_LabelsCantInjectFlags(t *testing.T) {
 			t.Errorf("Start with labels %+v: %v, want ErrInvalid", l, err)
 		}
 	}
+	// Review 50: labels carried in the context weren't checked.
+	for _, l := range []bobbin.Labels{{Step: "--privileged"}, {Workflow: "w --volume=/:/host"}, {Run: "a\nb"}} {
+		lctx := bobbin.WithLabels(ctx, l)
+		if _, err := (bobbin.Runner{Podman: podman}).Run(lctx, bobbin.Spec{Image: zeros}); !errors.Is(err, bobbin.ErrInvalid) {
+			t.Errorf("Run with context labels %+v: %v, want ErrInvalid", l, err)
+		}
+		if _, err := (bobbin.Runner{Podman: podman}).Start(lctx, bobbin.Spec{Image: zeros}); !errors.Is(err, bobbin.ErrInvalid) {
+			t.Errorf("Start with context labels %+v: %v, want ErrInvalid", l, err)
+		}
+	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Error("podman ran for labels that should have been refused")
 	}
@@ -237,6 +247,21 @@ func TestInv_ContainerStepsHeartbeat(t *testing.T) {
 	if beats.Load() < 1 {
 		t.Errorf("a container step heartbeat %d times in 0.3 s", beats.Load())
 	}
+	// Review 50: an image step didn't heartbeat, so a cancel never reached
+	// its build.
+	dir := t.TempDir()
+	build := filepath.Join(dir, "podman")
+	os.WriteFile(build, []byte("#!/bin/sh\ncase \"$*\" in \"image exists \"*) exit 0;; esac\nsleep 0.3\nfor a in \"$@\"; do [ \"$p\" = --iidfile ] && echo sha256:"+zeros+" > \"$a\"; p=$a; done\n"), 0o755)
+	env = s.NewTestActivityEnvironment()
+	beats.Store(0)
+	env.SetOnActivityHeartbeatListener(func(*activity.Info, converter.EncodedValues) { beats.Add(1) })
+	env.RegisterActivityWithOptions(shuttle.ArrowAsActivity(bobbin.ImageCommand(bobbin.Runner{Podman: build}, nil)), activity.RegisterOptions{Name: bobbin.ImageActivityName})
+	if _, err := env.ExecuteActivity(bobbin.ImageActivityName, plan.Input{NodeID: "n0", Args: []string{"FROM " + pin}}); err != nil {
+		t.Fatal(err)
+	}
+	if beats.Load() < 1 {
+		t.Errorf("an image step heartbeat %d times in 0.3 s", beats.Load())
+	}
 }
 
 // The ps answer below: one of heedle's containers, one with no labels and
@@ -336,11 +361,14 @@ case "$1" in images) cat <<'EOF'
  {"Id":"5","Names":["ghcr.io/heedle-ai/reed-browser@sha256:older","localhost/mine:2"],"Size":50,"Containers":0},
  {"Id":"5","Names":["ghcr.io/heedle-ai/reed-browser@sha256:older","localhost/mine:2"],"Size":50,"Containers":0},
  {"Id":"6","Names":["ghcr.io/heedle-ai-evil/x:1","ghcr.io/other/heedle-ai/y:1"],"Size":60,"Containers":0},
- {"Id":"7","Names":["ghcr.io/heedle-ai/reed-browser:dev"],"RepoDigests":["ghcr.io/heedle-ai/reed-browser@sha256:pinned"],"Size":70,"Containers":0}]
+ {"Id":"7","Names":["ghcr.io/heedle-ai/reed-browser:dev"],"RepoDigests":["ghcr.io/heedle-ai/reed-browser@sha256:pinned"],"Size":70,"Containers":0},
+ {"Id":"8","Names":["ghcr.io/heedle-ai/pirn-agent:byid"],"Size":80,"Containers":0},
+ {"Id":"9","Names":["ghcr.io/heedle-ai/pirn-agent:byfullid"],"Size":90,"Containers":0}]
 EOF
 ;; esac`)
 	r := bobbin.Runner{Podman: podman}
-	keep := []string{"ghcr.io/heedle-ai/pirn-agent@sha256:new", "ghcr.io/heedle-ai/reed-browser@sha256:pinned"}
+	// Review 50: an image kept by its ID was pruned (BOB-509).
+	keep := []string{"ghcr.io/heedle-ai/pirn-agent@sha256:new", "ghcr.io/heedle-ai/reed-browser@sha256:pinned", "8", "sha256:9"}
 	ims, err := r.Images(ctx, bobbin.HeedleRepo, keep)
 	if err != nil {
 		t.Fatal(err)
@@ -350,7 +378,7 @@ EOF
 		ids = append(ids, fmt.Sprintf("%s:%v", im.ID, im.Pinned))
 	}
 	slices.Sort(ids)
-	if want := []string{"1:true", "2:false", "3:false", "5:false", "7:true"}; !reflect.DeepEqual(ids, want) {
+	if want := []string{"1:true", "2:false", "3:false", "5:false", "7:true", "8:true", "9:true"}; !reflect.DeepEqual(ids, want) {
 		t.Errorf("Images = %v, want %v", ids, want)
 	}
 	os.Remove(log)
@@ -427,7 +455,14 @@ func TestContainer_HeedlesOwnOnly(t *testing.T) {
 			t.Error("your own container was listed as heedle's")
 		}
 		if c.Name == ss.Name() {
-			found = c.Labels == l && c.State == "running" && c.CPU != "" && c.Memory != ""
+			found = c.Labels == l && c.State == "running"
+			// Stats need a cgroup podman can read (not every rootless
+			// setup has one): figures whenever podman itself gives them.
+			if c.CPU == "" || c.Memory == "" {
+				if err := exec.Command("podman", "stats", "--no-stream", ss.Name()).Run(); err == nil {
+					t.Errorf("podman gives stats for %s, but the listing has none: %+v", ss.Name(), c)
+				}
+			}
 		}
 	}
 	if !found {

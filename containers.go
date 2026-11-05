@@ -186,7 +186,9 @@ func (r Runner) Images(ctx context.Context, repo string, keep []string) ([]Image
 		if len(im.Names) == 0 {
 			continue
 		}
-		for _, n := range append(append([]string{}, a.Names...), a.RepoDigests...) {
+		// An image is kept by any of its names or digests, or by its ID
+		// (BOB-509).
+		for _, n := range append(append([]string{a.ID, "sha256:" + a.ID}, a.Names...), a.RepoDigests...) {
 			if kept[n] {
 				im.Pinned = true
 			}
