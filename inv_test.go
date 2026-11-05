@@ -51,10 +51,17 @@ func TestInv_ExactPodmanCommandLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	// Each run is named, so a stopped step's container can be removed by
+	// name (BOB-508).
+	if len(got) < 5 || got[3] != "--name" || !regexp.MustCompile(`^bobbin-run-[0-9a-f]{16}$`).MatchString(got[4]) {
+		t.Fatalf("podman argv %q has no --name bobbin-run-…", got)
+	}
+	got = append(got[:3:3], got[5:]...)
 	want := []string{"run", "--rm", "-i", "--pull=never", "--network=none", "--cap-drop=all",
 		"--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m", "--log-driver=none",
 		"--http-proxy=false", "--label", "heedle.kind=container", "--env", "A=--privileged", "--env", "B=2", zeros, "--volume=/:/host", "-v", "/:/h"}
-	if got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n"); !reflect.DeepEqual(got, want) {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("podman argv\n got  %q\n want %q", got, want)
 	}
 	if got := s.Argv(90 * time.Second); got[11] != "--timeout=90" {

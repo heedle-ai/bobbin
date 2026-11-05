@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -473,5 +474,65 @@ func TestContainer_HeedlesOwnOnly(t *testing.T) {
 		if got := exec.Command("podman", "image", "exists", n).Run() == nil; got != want {
 			t.Errorf("after the prune, %s exists: %v, want %v", n, got, want)
 		}
+	}
+}
+
+// TestInv_StoppedStepsContainersAreRemoved: a run stopped (its step
+// cancelled, a deadline) or writing too much is removed by the name it was
+// run under, whatever its first process does with SIGTERM; a run that ends
+// on its own isn't (BOB-508).
+func TestInv_StoppedStepsContainersAreRemoved(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "log")
+	for _, c := range []struct {
+		name, run string
+		cancel    bool
+		removed   bool
+	}{
+		{"cancelled", `trap 'exit 143' TERM; while :; do sleep 0.05; done`, true, true},
+		{"too much output", `head -c 2000000 /dev/zero; trap 'exit 143' TERM; while :; do sleep 0.05; done`, false, true},
+		{"ends on its own", `echo ok`, false, false},
+	} {
+		os.Remove(log)
+		podman := fakePodman(t, `echo "$@" >> `+log+`
+case "$1" in run) cat >/dev/null; `+c.run+`;; esac`)
+		cctx, cancel := context.WithCancel(ctx)
+		if c.cancel {
+			time.AfterFunc(300*time.Millisecond, cancel)
+		}
+		_, err := bobbin.Runner{Podman: podman}.Run(cctx, bobbin.Spec{Image: zeros})
+		cancel()
+		b, _ := os.ReadFile(log)
+		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+		name := regexp.MustCompile(`--name (bobbin-run-[0-9a-f]{16})`).FindStringSubmatch(lines[0])
+		if name == nil {
+			t.Fatalf("%s: the run had no name: %q", c.name, lines[0])
+		}
+		rm := "rm --force --time 0 --ignore " + name[1]
+		if got := slices.Contains(lines, rm); got != c.removed {
+			t.Errorf("%s (%v): removed by name %v, want %v:\n%s", c.name, err, got, c.removed, b)
+		}
+	}
+}
+
+// TestContainer_StoppedStepLeavesNoContainer: with real podman, a step
+// stopped while its container's first process ignores SIGTERM (sleep as
+// PID 1) leaves no container behind (BOB-508).
+func TestContainer_StoppedStepLeavesNoContainer(t *testing.T) {
+	img := shellImage(t)
+	run := fmt.Sprintf("stop-%d", time.Now().UnixNano())
+	cctx, cancel := context.WithCancel(ctx)
+	time.AfterFunc(2*time.Second, cancel)
+	start := time.Now()
+	_, err := bobbin.Runner{}.Run(cctx, bobbin.Spec{Image: img, Args: []string{"/bin/sleep", "600"}, Labels: bobbin.Labels{Run: run}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want cancelled", err)
+	}
+	if d := time.Since(start); d > 45*time.Second {
+		t.Errorf("a stopped step took %v to end", d)
+	}
+	out, _ := exec.Command("podman", "ps", "--all", "--quiet", "--filter", "label=heedle.run="+run).Output()
+	if strings.TrimSpace(string(out)) != "" {
+		exec.Command("podman", "rm", "-f", "-t", "0", strings.TrimSpace(string(out))).Run()
+		t.Errorf("a stopped step's container outlived it: %s", out)
 	}
 }

@@ -5,7 +5,7 @@
 `Runner.Run` starts a container, writes the input to its standard input, waits, and returns its standard output. The command line is fixed; `Spec.Argv` returns it, and `TestInv_ExactPodmanCommandLine` checks it word for word:
 
 ```text
-podman run --rm -i --pull=never --network=none --cap-drop=all
+podman run --rm -i --name bobbin-run-<random> --pull=never --network=none --cap-drop=all
            --security-opt=no-new-privileges --pids-limit=256 --memory=512m
            --log-driver=none --http-proxy=false [--timeout=N]
            --label heedle.kind=KIND [--label heedle.NAME=VALUE ...] [--env KEY=VALUE ...]
@@ -118,7 +118,7 @@ Every container bobbin starts carries `heedle.kind`; one started for a step of a
 
 `Spec.Labels` takes them. What a step's container doesn't name itself comes from the context: `StepLabels(ctx, node)` reads the workflow and its run from Temporal's activity info, and `WithLabels` lets everything started under a step's context carry them. loom sets them where every step's activity starts, and the `container` command labels its own containers. A value is printable ASCII without spaces, quotes, commas or `=`, starting with a letter or digit, at most 255 bytes. `Spec.Validate` refuses anything else as `ErrInvalid` before Podman runs, and `StepLabels` leaves such a value out, so labelling never fails a step. Each label is one `--label NAME=VALUE` argument after the fixed flags, so no value can become a flag. Sessions keep their old `bobbin.session=1` label too.
 
-A `container` step heartbeats to Temporal while its container runs. Temporal tells an activity it was cancelled only when the activity heartbeats, so cancelling a run (`loom cancel`) ends the step. Podman then stops the container, and `--rm` removes it.
+A `container` step heartbeats to Temporal while its container runs. Temporal tells an activity it was cancelled only when the activity heartbeats, so cancelling a run (`loom cancel`) ends the step. Each run is named (`--name bobbin-run-<random>`, `Spec.NamedArgv`). When a step is stopped (its run cancelled, a deadline) or writes too much, podman is told to stop, and `Run` then removes the container by that name, as a session's `Close` does. So a container whose first process ignores SIGTERM, such as `sleep`, can't outlive its step.
 
 Five calls see and tidy what heedle left on the machine, each one Podman command:
 
