@@ -50,18 +50,34 @@ var homeValue = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 // HomeOf is the home label of the heedle home whose store is store: the
 // first 12 hex digits of the SHA-256 of the store's absolute path, with
-// symbolic links resolved when it exists. It names a home without putting
-// its path in a label.
+// symbolic links resolved, as far as the path exists: so a store not made
+// yet has the label it will have once it is (review 55). It names a home
+// without putting its path in a label. Letter case is kept: on a disk that
+// ignores case, two spellings of one path are two labels.
 func HomeOf(store string) string {
 	p, err := filepath.Abs(store)
 	if err != nil {
 		p = store
 	}
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		p = r
-	}
-	sum := sha256.Sum256([]byte(p))
+	sum := sha256.Sum256([]byte(resolved(p)))
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+// resolved is the absolute path p with symbolic links resolved in its
+// longest part that exists, and the rest joined on unchanged.
+func resolved(p string) string {
+	rest := ""
+	for dir := p; ; {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
+	}
 }
 
 // ValidHome reports whether h may be a heedle.home value (HomeOf's form).

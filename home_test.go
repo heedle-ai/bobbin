@@ -144,3 +144,23 @@ END
 		t.Errorf("homes: %q %q %q", cs[0].Labels.Home, cs[1].Labels.Home, cs[2].Labels.Home)
 	}
 }
+
+// TestInv_HomeOfIsTheSameBeforeTheStoreExists: a store not made yet,
+// reached through a symbolic link, has the label it will have once it is
+// made (BOB-522, review 55: heedle up labelled a fresh home by its
+// unresolved path, and the worker by its resolved one).
+func TestInv_HomeOfIsTheSameBeforeTheStoreExists(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	store := filepath.Join(link, "home", "store.git")
+	before := bobbin.HomeOf(store)
+	if err := os.MkdirAll(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if after := bobbin.HomeOf(store); before != after || after != bobbin.HomeOf(filepath.Join(real, "home", "store.git")) {
+		t.Errorf("HomeOf before the store exists %q, after %q, by its real path %q", before, after, bobbin.HomeOf(filepath.Join(real, "home", "store.git")))
+	}
+}
