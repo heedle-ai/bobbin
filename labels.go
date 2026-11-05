@@ -2,7 +2,10 @@ package bobbin
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"path/filepath"
 	"regexp"
 
 	"go.temporal.io/sdk/activity"
@@ -13,12 +16,15 @@ import (
 // and run that scheduled it, as Temporal reports them, and the step's
 // node ID. They're how heedle finds its own containers, and the only way
 // it tells them from anything else on the machine: heedle stops or
-// removes only containers that carry them.
+// removes only containers that carry them. One started by a worker that
+// knows its home also carries LabelHome (roadmap 9.2.1), so two heedle
+// homes running at once each tidy only their own.
 const (
 	LabelKind     = "heedle.kind"
 	LabelWorkflow = "heedle.workflow"
 	LabelRun      = "heedle.run"
 	LabelStep     = "heedle.step"
+	LabelHome     = "heedle.home"
 )
 
 // Kinds are the kinds of container heedle starts: an agent step's
@@ -33,7 +39,33 @@ type Labels struct {
 	Workflow string `json:"workflow,omitempty"`
 	Run      string `json:"run,omitempty"`
 	Step     string `json:"step,omitempty"`
+	// Home is the home whose worker started the container (HomeOf its
+	// store); empty for a container from before roadmap 9.2.1, or from a
+	// worker that doesn't say.
+	Home string `json:"home,omitempty"`
 }
+
+// homeValue is what heedle.home may be: HomeOf's 12 hex digits.
+var homeValue = regexp.MustCompile(`^[0-9a-f]{12}$`)
+
+// HomeOf is the home label of the heedle home whose store is store: the
+// first 12 hex digits of the SHA-256 of the store's absolute path, with
+// symbolic links resolved when it exists. It names a home without putting
+// its path in a label.
+func HomeOf(store string) string {
+	p, err := filepath.Abs(store)
+	if err != nil {
+		p = store
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
+	sum := sha256.Sum256([]byte(p))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// ValidHome reports whether h may be a heedle.home value (HomeOf's form).
+func ValidHome(h string) bool { return homeValue.MatchString(h) }
 
 // labelValue is what a label's value may be: printable ASCII with no
 // space, quote, comma or equals sign, starting with a letter or digit, at
@@ -67,6 +99,9 @@ func (l Labels) Validate() error {
 			return fmt.Errorf("label %s=%q has characters a label can't", name, v)
 		}
 	}
+	if l.Home != "" && !ValidHome(l.Home) {
+		return fmt.Errorf("label %s=%q isn't 12 hex digits", LabelHome, l.Home)
+	}
 	return nil
 }
 
@@ -76,7 +111,7 @@ func (l Labels) Of(k string) Labels { l.Kind = k; return l }
 // Map is l as podman's labels: name to value, the empty ones left out.
 func (l Labels) Map() map[string]string {
 	m := map[string]string{}
-	for _, kv := range [][2]string{{LabelKind, l.Kind}, {LabelWorkflow, l.Workflow}, {LabelRun, l.Run}, {LabelStep, l.Step}} {
+	for _, kv := range l.pairs() {
 		if kv[1] != "" {
 			m[kv[0]] = kv[1]
 		}
@@ -91,7 +126,7 @@ func (l Labels) args(def string) []string {
 		l.Kind = def
 	}
 	var argv []string
-	for _, kv := range [][2]string{{LabelKind, l.Kind}, {LabelWorkflow, l.Workflow}, {LabelRun, l.Run}, {LabelStep, l.Step}} {
+	for _, kv := range l.pairs() {
 		if kv[1] != "" {
 			argv = append(argv, "--label", kv[0]+"="+kv[1])
 		}
@@ -99,17 +134,45 @@ func (l Labels) args(def string) []string {
 	return argv
 }
 
+// pairs are l's labels, name and value, in a fixed order.
+func (l Labels) pairs() [][2]string {
+	return [][2]string{{LabelKind, l.Kind}, {LabelWorkflow, l.Workflow}, {LabelRun, l.Run}, {LabelStep, l.Step}, {LabelHome, l.Home}}
+}
+
 // orFrom is l, with the run labels ctx carries (WithLabels) when l has
-// none of its own.
+// none of its own, and the home ctx carries (WithHome, else the labels')
+// when l names none.
 func (l Labels) orFrom(ctx context.Context) Labels {
+	c := LabelsFrom(ctx)
 	if l.Workflow == "" && l.Run == "" && l.Step == "" {
-		c := LabelsFrom(ctx)
 		l.Workflow, l.Run, l.Step = c.Workflow, c.Run, c.Step
+	}
+	if l.Home == "" {
+		l.Home = HomeFrom(ctx)
+	}
+	if l.Home == "" {
+		l.Home = c.Home
 	}
 	return l
 }
 
 type labelsKey struct{}
+
+type homeKey struct{}
+
+// WithHome is ctx carrying the home label of the worker's home (HomeOf
+// its store), for every container started under it (roadmap 9.2.1). A
+// worker sets it on the context all its activities start from, so every
+// container it starts says which home it is.
+func WithHome(ctx context.Context, home string) context.Context {
+	return context.WithValue(ctx, homeKey{}, home)
+}
+
+// HomeFrom is the home label ctx carries (WithHome), if any.
+func HomeFrom(ctx context.Context) string {
+	h, _ := ctx.Value(homeKey{}).(string)
+	return h
+}
 
 // WithLabels is ctx carrying a step's run labels, for every container
 // started under it that has none of its own: loom sets them where a
@@ -126,8 +189,8 @@ func LabelsFrom(ctx context.Context) Labels {
 
 // StepLabels are the run labels of the step node, read from Temporal's
 // activity info when ctx is an activity's: the workflow that scheduled
-// it and that workflow's run. A value a label can't hold is left out, so
-// labelling never fails a step.
+// it and that workflow's run; and the home ctx carries (WithHome). A
+// value a label can't hold is left out, so labelling never fails a step.
 func StepLabels(ctx context.Context, step string) Labels {
 	var l Labels
 	if activity.IsActivity(ctx) {
@@ -139,6 +202,9 @@ func StepLabels(ctx context.Context, step string) Labels {
 		if !ValidLabelValue(*v) {
 			*v = ""
 		}
+	}
+	if h := HomeFrom(ctx); ValidHome(h) {
+		l.Home = h
 	}
 	return l
 }

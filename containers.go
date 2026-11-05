@@ -35,6 +35,10 @@ type Container struct {
 
 var fullID = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// InvalidHome is the Home Containers gives a container whose heedle.home
+// label isn't 12 hex digits: never a home's, and never "no label".
+const InvalidHome = "invalid"
+
 // Containers lists heedle's containers: those labelled heedle.kind with
 // one of Kinds. Labels with values a label can't hold are left out. CPU
 // and memory come from podman stats, once; if it can't say (a container
@@ -58,7 +62,7 @@ func (r Runner) Containers(ctx context.Context) ([]Container, error) {
 	cs := []Container{}
 	var running []string
 	for _, p := range ps {
-		l := Labels{Kind: p.Labels[LabelKind], Workflow: p.Labels[LabelWorkflow], Run: p.Labels[LabelRun], Step: p.Labels[LabelStep]}
+		l := Labels{Kind: p.Labels[LabelKind], Workflow: p.Labels[LabelWorkflow], Run: p.Labels[LabelRun], Step: p.Labels[LabelStep], Home: p.Labels[LabelHome]}
 		if !KnownKind(l.Kind) || !fullID.MatchString(p.ID) {
 			continue
 		}
@@ -66,6 +70,12 @@ func (r Runner) Containers(ctx context.Context) ([]Container, error) {
 			if !ValidLabelValue(*v) {
 				*v = ""
 			}
+		}
+		// A home label that isn't one is never taken for no label: such
+		// a container is some other home's, never this one's to tidy
+		// (BOB-521).
+		if _, ok := p.Labels[LabelHome]; ok && !ValidHome(l.Home) {
+			l.Home = InvalidHome
 		}
 		c := Container{ID: p.ID, Image: p.Image, Labels: l, Created: time.Unix(p.Created, 0).UTC(), State: p.State}
 		if len(p.Names) > 0 {
