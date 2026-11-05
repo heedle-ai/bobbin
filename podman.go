@@ -3,6 +3,8 @@ package bobbin
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -175,20 +177,28 @@ func sortedKeys(m map[string]string) []string {
 }
 
 // Argv is the exact podman command line Run uses for s, without the
-// executable. Flags come first and are fixed; the image, then s.Args,
-// come last, so nothing in Args can be read as a podman flag.
-func (s Spec) Argv(timeout time.Duration) []string {
-	argv := []string{
-		"run", "--rm", "-i",
+// executable and the container's name (NamedArgv). Flags come first and
+// are fixed; the image, then s.Args, come last, so nothing in Args can be
+// read as a podman flag.
+func (s Spec) Argv(timeout time.Duration) []string { return s.NamedArgv("", timeout) }
+
+// NamedArgv is Argv for a container named name: Run names each one, so
+// that it can remove one whose step was stopped (BOB-508).
+func (s Spec) NamedArgv(name string, timeout time.Duration) []string {
+	argv := []string{"run", "--rm", "-i"}
+	if name != "" {
+		argv = append(argv, "--name", name)
+	}
+	argv = append(argv,
 		"--pull=never",                     // only images already present: no surprise downloads
 		"--network=none",                   // no network at all
 		"--cap-drop=all",                   // no Linux capabilities
 		"--security-opt=no-new-privileges", // setuid binaries can't gain any
-		"--pids-limit=" + strconv.Itoa(PidsLimit),
-		"--memory=" + MemoryLimit,
+		"--pids-limit="+strconv.Itoa(PidsLimit),
+		"--memory="+MemoryLimit,
 		"--log-driver=none",  // output goes only to us
 		"--http-proxy=false", // don't copy the host's proxy variables in
-	}
+	)
 	if timeout > 0 {
 		argv = append(argv, "--timeout="+strconv.Itoa(int(math.Ceil(timeout.Seconds()))))
 	}
@@ -215,7 +225,12 @@ func (r Runner) Run(ctx context.Context, s Spec) ([]byte, error) {
 		}
 	}
 	podman := r.podman()
-	cmd := exec.CommandContext(ctx, podman, s.Argv(timeout)...)
+	id := make([]byte, 8)
+	if _, err := rand.Read(id); err != nil {
+		return nil, err
+	}
+	name := "bobbin-run-" + hex.EncodeToString(id)
+	cmd := exec.CommandContext(ctx, podman, s.NamedArgv(name, timeout)...)
 	cmd.Env = s.secretEnv()
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = 10 * time.Second
@@ -224,6 +239,17 @@ func (r Runner) Run(ctx context.Context, s Spec) ([]byte, error) {
 	stderr := &tail{max: StderrTail}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
+	if ctx.Err() != nil || stdout.full {
+		// The step was stopped (a run cancelled, a deadline) or wrote too
+		// much: podman was told to stop, but a container whose first
+		// process ignores SIGTERM would outlive it. Remove it by name, as
+		// a session's Close does (BOB-508).
+		rm, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		rmCmd := exec.CommandContext(rm, podman, "rm", "--force", "--time", "0", "--ignore", name)
+		rmCmd.Env = cleanEnv(os.Environ())
+		_ = rmCmd.Run()
+		cancel()
+	}
 	if stdout.full {
 		return nil, fmt.Errorf("%w: more than %d bytes", ErrOutputTooLarge, MaxOutput)
 	}
