@@ -78,6 +78,11 @@ type Spec struct {
 	Secrets map[string]string
 	// Stdin is the container's standard input.
 	Stdin []byte
+	// Labels are heedle's labels for the container (roadmap 9.2): names,
+	// never anything from the host. With no Kind, a one-shot run is a
+	// "container" and a session an "agent"; with no run labels, those
+	// the context carries (WithLabels) are used.
+	Labels Labels
 }
 
 // Runner runs containers with the podman command line.
@@ -105,6 +110,9 @@ func (s Spec) Validate() error {
 		if !envKey.MatchString(k) || strings.ContainsRune(v, 0) || !utf8.ValidString(v) {
 			return fmt.Errorf("%w: environment variable %q=%q", ErrInvalid, k, v)
 		}
+	}
+	if err := s.Labels.Validate(); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	for k, v := range s.Secrets {
 		if _, both := s.Env[k]; both || !envKey.MatchString(k) || strings.ContainsRune(v, 0) || !utf8.ValidString(v) || v == "" {
@@ -184,6 +192,7 @@ func (s Spec) Argv(timeout time.Duration) []string {
 	if timeout > 0 {
 		argv = append(argv, "--timeout="+strconv.Itoa(int(math.Ceil(timeout.Seconds()))))
 	}
+	argv = append(argv, s.Labels.args("container")...)
 	argv = append(argv, s.envArgs()...)
 	argv = append(argv, s.Image)
 	return append(argv, s.Args...)
@@ -198,6 +207,7 @@ func (r Runner) Run(ctx context.Context, s Spec) ([]byte, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
+	s.Labels = s.Labels.orFrom(ctx)
 	var timeout time.Duration
 	if d, ok := ctx.Deadline(); ok {
 		if timeout = time.Until(d); timeout <= 0 {

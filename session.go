@@ -69,6 +69,7 @@ func (s Spec) SessionArgv(name string, life time.Duration) []string {
 		"--timeout=" + strconv.Itoa(int(math.Ceil(life.Seconds()))),
 		"--entrypoint", "/bin/sh",
 	}
+	argv = append(argv, s.Labels.args("agent")...)
 	argv = append(argv, s.envArgs()...)
 	return append(argv, s.Image, "-c", keepAlive)
 }
@@ -83,6 +84,7 @@ func (r Runner) Start(ctx context.Context, s Spec) (*Session, error) {
 	if len(s.Args) > 0 || len(s.Stdin) > 0 {
 		return nil, fmt.Errorf("%w: a session takes no arguments or standard input; run commands with Exec", ErrInvalid)
 	}
+	s.Labels = s.Labels.orFrom(ctx)
 	life := MaxSessionLife
 	if d, ok := ctx.Deadline(); ok && time.Until(d) < life {
 		if life = time.Until(d); life <= 0 {
