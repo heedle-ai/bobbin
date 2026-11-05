@@ -254,6 +254,11 @@ func ImageCommand(r Runner, reg *ImageRegistry) weft.Arrow[plan.Input, string] {
 		if push && (reg == nil || !imageRepo.MatchString(reg.Repo)) {
 			return "", temporal.NewNonRetryableApplicationError("the worker has no image registry to push to; give it one with -image-registry", "ImageSetup", nil)
 		}
+		if activity.IsActivity(ctx) {
+			// As a container step does, so a cancel reaches the build (BOB-504).
+			stop := heartbeat(ctx, heartbeatEvery)
+			defer stop()
+		}
 		id, err := r.Build(ctx, Build{Containerfile: in.Args[0], Inputs: in.Upstream})
 		switch {
 		case errors.Is(err, ErrInvalid):

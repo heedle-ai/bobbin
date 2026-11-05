@@ -78,13 +78,13 @@ func (s Spec) SessionArgv(name string, life time.Duration) []string {
 // session runs commands with Exec instead) and creates Workdir. The session
 // lasts at most until ctx's deadline, or MaxSessionLife.
 func (r Runner) Start(ctx context.Context, s Spec) (*Session, error) {
+	s.Labels = s.Labels.orFrom(ctx) // checked by Validate (BOB-501)
 	if err := s.Validate(); err != nil {
 		return nil, err
 	}
 	if len(s.Args) > 0 || len(s.Stdin) > 0 {
 		return nil, fmt.Errorf("%w: a session takes no arguments or standard input; run commands with Exec", ErrInvalid)
 	}
-	s.Labels = s.Labels.orFrom(ctx)
 	life := MaxSessionLife
 	if d, ok := ctx.Deadline(); ok && time.Until(d) < life {
 		if life = time.Until(d); life <= 0 {
