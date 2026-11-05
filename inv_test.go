@@ -53,7 +53,7 @@ func TestInv_ExactPodmanCommandLine(t *testing.T) {
 	}
 	want := []string{"run", "--rm", "-i", "--pull=never", "--network=none", "--cap-drop=all",
 		"--security-opt=no-new-privileges", "--pids-limit=256", "--memory=512m", "--log-driver=none",
-		"--http-proxy=false", "--env", "A=--privileged", "--env", "B=2", zeros, "--volume=/:/host", "-v", "/:/h"}
+		"--http-proxy=false", "--label", "heedle.kind=container", "--env", "A=--privileged", "--env", "B=2", zeros, "--volume=/:/host", "-v", "/:/h"}
 	if got := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n"); !reflect.DeepEqual(got, want) {
 		t.Errorf("podman argv\n got  %q\n want %q", got, want)
 	}
@@ -75,6 +75,8 @@ func TestInv_NoMounts(t *testing.T) {
 		"--detach": true, "--name": true, "--label": true, "--entrypoint": true, "-c": true,
 		"--interactive": true, "--workdir": true, "--format": true, "--force": true, "--time": true,
 		"--ignore": true,
+		// Listing heedle's containers (roadmap 9.2): ps and stats flags.
+		"--all": true, "--filter": true, "--no-stream": true,
 		// Builds and pushes (build.go): fixed timestamps and labels, the
 		// image ID and digest files, the Containerfile, the push format,
 		// and TLS off only for a plain-HTTP registry the worker names.
@@ -110,13 +112,14 @@ func TestInv_NoMounts(t *testing.T) {
 	}
 	// Secrets (BOB-27) are values the caller gives, like Env: nothing from
 	// the host.
-	if got := strings.Join(fields, " "); got != "Image Args Env Secrets Stdin" {
+	// Labels (BOB-500) are names the caller gives, never a host path.
+	if got := strings.Join(fields, " "); got != "Image Args Env Secrets Stdin Labels" {
 		t.Errorf("Spec fields = %s; adding a field needs a new invariant", got)
 	}
 }
 
 // TestInv_OnlyPodmanRunsProcesses: bobbin's own imports are an allowlist,
-// and only podman.go and session.go start processes.
+// and only podman.go, session.go and containers.go start processes.
 func TestInv_OnlyPodmanRunsProcesses(t *testing.T) {
 	out, err := exec.Command("go", "list", "-f", `{{join .Imports "\n"}}`, ".").Output()
 	if err != nil {
@@ -138,7 +141,7 @@ func TestInv_OnlyPodmanRunsProcesses(t *testing.T) {
 	}
 	files, _ := filepath.Glob("*.go")
 	for _, name := range files {
-		if strings.HasSuffix(name, "_test.go") || name == "podman.go" || name == "session.go" {
+		if strings.HasSuffix(name, "_test.go") || name == "podman.go" || name == "session.go" || name == "containers.go" {
 			continue
 		}
 		f, err := parser.ParseFile(token.NewFileSet(), name, nil, parser.ImportsOnly)
@@ -147,7 +150,7 @@ func TestInv_OnlyPodmanRunsProcesses(t *testing.T) {
 		}
 		for _, im := range f.Imports {
 			if p, _ := strconv.Unquote(im.Path.Value); p == "os/exec" || p == "syscall" {
-				t.Errorf("%s imports %s; only podman.go and session.go start processes", name, p)
+				t.Errorf("%s imports %s; only podman.go, session.go and containers.go start processes", name, p)
 			}
 		}
 	}
@@ -279,7 +282,7 @@ func TestInv_ExactSessionCommandLines(t *testing.T) {
 	b, _ := os.ReadFile(log)
 	want := "run --detach --rm --name " + name + " --label bobbin.session=1 --pull=never --network=none --cap-drop=all " +
 		"--security-opt=no-new-privileges --pids-limit=256 --memory=512m --log-driver=none --http-proxy=false --timeout=1800 " +
-		"--entrypoint /bin/sh --env HEEDLE_NODE=n0 " + zeros + " -c trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done\n" +
+		"--entrypoint /bin/sh --label heedle.kind=agent --env HEEDLE_NODE=n0 " + zeros + " -c trap 'exit 0' TERM; while :; do sleep 3600 & wait $!; done\n" +
 		"exec " + name + " /bin/sh -c mkdir -p /work\n" +
 		"exec --interactive --workdir /work " + name + " /bin/sh -c ls -la sh\n" +
 		"exec --interactive --workdir /work " + name + ` /bin/sh -c mkdir -p "$(dirname "$1")" && cat > "$1" sh /in/n0.txt` + "\n" +

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"time"
 
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
@@ -49,12 +50,18 @@ func Command(r Runner) weft.Arrow[plan.Input, string] {
 		attempt := int32(1)
 		if activity.IsActivity(ctx) {
 			attempt = activity.GetInfo(ctx).Attempt
+			// Temporal tells an activity it's cancelled only when it
+			// heartbeats: so a run stopped through Temporal (loom cancel)
+			// ends this step, and --rm removes its container (BOB-504).
+			stop := heartbeat(ctx, heartbeatEvery)
+			defer stop()
 		}
 		out, err := r.Run(ctx, Spec{
-			Image: in.Args[0],
-			Args:  in.Args[1:],
-			Env:   map[string]string{"HEEDLE_NODE": in.NodeID, "HEEDLE_ATTEMPT": strconv.Itoa(int(attempt))},
-			Stdin: stdin,
+			Image:  in.Args[0],
+			Args:   in.Args[1:],
+			Env:    map[string]string{"HEEDLE_NODE": in.NodeID, "HEEDLE_ATTEMPT": strconv.Itoa(int(attempt))},
+			Stdin:  stdin,
+			Labels: StepLabels(ctx, in.NodeID).Of("container"),
 		})
 		switch {
 		case errors.Is(err, ErrInvalid):
@@ -98,4 +105,29 @@ func Register(reg *registry.Registry, w Activities, r Runner) error {
 	}
 	w.RegisterActivityWithOptions(shuttle.ArrowAsActivity(Command(r)), activity.RegisterOptions{Name: ActivityName})
 	return nil
+}
+
+// heartbeatEvery is how often a container step heartbeats; Temporal's SDK
+// sends at most one a few seconds anyway.
+var heartbeatEvery = 5 * time.Second
+
+// heartbeat records a heartbeat for ctx's activity every interval until
+// stop is called.
+func heartbeat(ctx context.Context, every time.Duration) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				activity.RecordHeartbeat(ctx)
+			}
+		}
+	}()
+	return func() { close(done) }
 }

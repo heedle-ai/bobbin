@@ -7,7 +7,8 @@
 ```text
 podman run --rm -i --pull=never --network=none --cap-drop=all
            --security-opt=no-new-privileges --pids-limit=256 --memory=512m
-           --log-driver=none --http-proxy=false [--timeout=N] [--env KEY=VALUE ...]
+           --log-driver=none --http-proxy=false [--timeout=N]
+           --label heedle.kind=KIND [--label heedle.NAME=VALUE ...] [--env KEY=VALUE ...]
            IMAGE [ARGS ...]
 ```
 
@@ -25,6 +26,7 @@ Every flag comes before the image. Podman stops reading its own flags at the ima
 | `--log-driver=none` | Podman keeps no copy of the output | Output goes only to bobbin |
 | `--http-proxy=false` | Podman doesn't copy the host's proxy variables in | By default it does, so a proxy URL with credentials would reach every agent (found in review 4) |
 | `--timeout=N` | Podman stops the container after N seconds | Set from the context deadline, such as the activity's start-to-close timeout |
+| `--label heedle.NAME=VALUE` | Marks the container as heedle's: its kind, and the run and step it belongs to | So heedle can list, stop and clean up its own containers, and never anyone else's ([below](#heedles-labels-and-tidying-up)) |
 | `--env KEY=VALUE` | Sets a variable inside the container | Only the variables in `Spec.Env`; nothing is inherited from the host |
 | `--env NAME` | Sets a secret inside the container, its value taken from podman's own environment | Only the names in `Spec.Secrets`, whose values bobbin puts in podman's environment, so they never appear on a command line any process on the host can read |
 
@@ -102,6 +104,37 @@ What a build doesn't bound, plainly:
 `(image "<Containerfile>" "push")` also pushes the image, and only then: to the worker's `-image-registry` repository (such as `ghcr.io/acme/heedle-images`), tagged `sha256-<hex>`, with the worker's own `podman login`. The program never sees the credentials, and without a registry the step fails at once with `ImageSetup`. The output gains `"pushed": "<repo>@sha256:<manifest digest>"`.
 
 A build or push that fails is retryable (a push the registry refuses for lack of a login too, so give the worker its `podman login` first); a Containerfile the check refuses fails with `InvalidInput`, and a base image the worker doesn't have with `ContainerSetup`. The step's plan node carries a 30-minute timeout (`ImageOptions`).
+
+## heedle's labels, and tidying up
+
+Every container bobbin starts carries `heedle.kind`; one started for a step of a run also carries the run and the step (roadmap 9.2). These labels are how heedle finds its own containers, and the only way it tells them apart from anything else on the machine.
+
+| Label | Value |
+|---|---|
+| `heedle.kind` | `agent`, `skill`, `container`, `connector`, `browse` or `act`. With none given, a single run is a `container` and a session an `agent` |
+| `heedle.workflow` | The Temporal workflow that scheduled the step, as Temporal reports it: for a loom run, its plan workflow, `<run's workflow ID>/plan` |
+| `heedle.run` | That workflow's run ID |
+| `heedle.step` | The step's node ID in the plan |
+
+`Spec.Labels` takes them. What a step's container doesn't name itself comes from the context: `StepLabels(ctx, node)` reads the workflow and its run from Temporal's activity info, and `WithLabels` lets everything started under a step's context carry them. loom sets them where every step's activity starts, and the `container` command labels its own containers. A value is printable ASCII without spaces, quotes, commas or `=`, starting with a letter or digit, at most 255 bytes. `Spec.Validate` refuses anything else as `ErrInvalid` before Podman runs, and `StepLabels` leaves such a value out, so labelling never fails a step. Each label is one `--label NAME=VALUE` argument after the fixed flags, so no value can become a flag. Sessions keep their old `bobbin.session=1` label too.
+
+A `container` step heartbeats to Temporal while its container runs. Temporal tells an activity it was cancelled only when the activity heartbeats, so cancelling a run (`loom cancel`) ends the step. Podman then stops the container, and `--rm` removes it.
+
+Five calls see and tidy what heedle left on the machine, each one Podman command:
+
+| Call | What it does | Podman |
+|---|---|---|
+| `Runner.Containers` | Lists heedle's containers: those labelled `heedle.kind` with one of the six kinds, with their labels, image, age, state, and the CPU and memory of running ones | `podman ps --all --filter label=heedle.kind --format json`, then `podman stats --no-stream --format json ID...` |
+| `Runner.Remove(which)` | Lists heedle's containers again and removes those `which` picks. It can only remove what that listing found | `podman rm --force --time 0 --ignore ID...` |
+| `Runner.Images(repo, keep)` | Lists the images named under `repo` (heedle's is `HeedleRepo`, `ghcr.io/heedle-ai/`), each once, marking those whose name or digest is in `keep` | `podman images --format json` |
+| `Runner.PruneImages(repo, keep)` | For each image named under `repo` that isn't kept and that no container uses, removes its names under `repo`, one at a time and never forced. An image that also has a name of your own keeps that name, and Podman keeps the image; one left with no name is deleted | `podman image rm NAME` |
+| `Runner.Machine` | Podman's virtual machine on macOS: CPUs, memory and disk (nil on Linux, which needs none) | `podman machine list --format json` |
+
+`repo` must be a registry and an organization ending in `/`, so a prune can never mean "every image". It also needs at least one image to keep, so it can't remove the release's own. To see heedle's containers with Podman itself:
+
+```bash
+podman ps --all --filter label=heedle.kind
+```
 
 ## Retries get a fresh container
 
